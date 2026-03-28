@@ -1,0 +1,178 @@
+menu "WSPR Transmitter"
+
+    config WSPR_DEFAULT_CALLSIGN
+        string "Default callsign"
+        default "N0CALL"
+        help
+            WSPR callsign used when no saved configuration exists in NVS.
+
+    config WSPR_DEFAULT_LOCATOR
+        string "Default Maidenhead locator (4 chars)"
+        default "AA00"
+        help
+            4-character Maidenhead grid square used when no saved config exists.
+
+    config WSPR_DEFAULT_POWER_DBM
+        int "Default TX power (dBm)"
+        default 23
+        range 0 60
+        help
+            Transmit power in dBm (valid WSPR levels: 0,3,7,10,13,17,20,23,
+            27,30,33,37,40,43,47,50,53,57,60). Values not in the list are
+            rounded to the nearest valid level by the encoder.
+
+    config SI5351_I2C_PORT
+        int "I2C port number (0 or 1)"
+        default 0
+        range 0 1
+        help
+            ESP32 I2C peripheral index used for the Si5351 auto-detection probe.
+
+    config SI5351_SDA_GPIO
+        int "Si5351 SDA GPIO"
+        default 21
+        range 0 39
+
+    config SI5351_SCL_GPIO
+        int "Si5351 SCL GPIO"
+        default 22
+        range 0 39
+
+    config SI5351_XTAL_FREQ
+        int "Si5351 crystal frequency (Hz)"
+        default 25000000
+        help
+            Crystal frequency on the Si5351 module.
+            Common values: 25000000 or 27000000.
+
+    choice SI5351_DRIVE_MA
+        prompt "Si5351 CLK0 output drive current"
+        default SI5351_DRIVE_8MA
+        help
+            Output drive current of the Si5351 CLK0 pin.
+            This sets bits 1:0 of the CLK0 control register (reg 16).
+            2 mA is the lowest power setting; 8 mA gives maximum drive.
+            Reduce the drive if the output level exceeds your local legal
+            limit without an external attenuator.
+
+        config SI5351_DRIVE_2MA
+            bool "2 mA (~3 dBm into 50 Ohm)"
+
+        config SI5351_DRIVE_4MA
+            bool "4 mA (~7 dBm into 50 Ohm)"
+
+        config SI5351_DRIVE_6MA
+            bool "6 mA (~10 dBm into 50 Ohm)"
+
+        config SI5351_DRIVE_8MA
+            bool "8 mA (~13 dBm into 50 Ohm)"
+
+    endchoice
+
+    config AD9850_CLK_GPIO
+        int "AD9850 CLK GPIO"
+        default 18
+        range 0 39
+
+    config AD9850_FQ_UD_GPIO
+        int "AD9850 FQ_UD GPIO"
+        default 19
+        range 0 39
+
+    config AD9850_DATA_GPIO
+        int "AD9850 DATA GPIO"
+        default 23
+        range 0 39
+
+    config AD9850_RESET_GPIO
+        int "AD9850 RESET GPIO"
+        default 5
+        range 0 39
+
+    config AD9850_REF_CLOCK
+        int "AD9850 reference clock (Hz)"
+        default 125000000
+        help
+            Reference oscillator frequency on the AD9850 module in Hz.
+            Most common modules use 125000000.
+
+    choice WSPR_TIME_SOURCE
+        prompt "Time synchronization source"
+        default WSPR_TIME_NTP
+        help
+            Select how the ESP32 obtains accurate UTC time for WSPR scheduling.
+
+        config WSPR_TIME_NTP
+            bool "NTP (SNTP over WiFi)"
+
+        config WSPR_TIME_GPS
+            bool "GPS (NMEA RMC sentences via UART)"
+
+    endchoice
+
+    if WSPR_TIME_GPS
+
+        config GPS_UART_PORT
+            int "GPS UART port number"
+            default 1
+            range 0 2
+            help
+                ESP32 UART peripheral index connected to the GPS module.
+
+        config GPS_RX_GPIO
+            int "GPS RX GPIO (ESP32 receives NMEA from GPS TX)"
+            default 16
+            range 0 39
+
+        config GPS_TX_GPIO
+            int "GPS TX GPIO (ESP32 transmits to GPS RX)"
+            default 17
+            range 0 39
+
+        config GPS_BAUD_RATE
+            int "GPS baud rate"
+            default 9600
+            help
+                Serial baud rate of the GPS module. Most modules default to 9600.
+
+    endif
+
+    config FILTER_GPIO_A
+        int "LPF select GPIO bit 0 (A)"
+        default 25
+        range 0 39
+        help
+            GPIO driving bit 0 of the 3-bit low-pass filter bank address.
+            The three GPIO pins together form a 3-bit binary address (0-7)
+            selecting one of up to 8 filter relays or switches.
+
+    config FILTER_GPIO_B
+        int "LPF select GPIO bit 1 (B)"
+        default 26
+        range 0 39
+        help
+            GPIO driving bit 1 of the 3-bit low-pass filter bank address.
+
+    config FILTER_GPIO_C
+        int "LPF select GPIO bit 2 (C)"
+        default 27
+        range 0 39
+        help
+            GPIO driving bit 2 of the 3-bit low-pass filter bank address.
+
+    config WSPR_AP_SSID
+        string "SoftAP SSID (fallback when STA fails)"
+        default "WSPR-Config"
+        help
+            Wi-Fi network name broadcast by the ESP32 when it cannot connect
+            to a saved STA network. Connect to this SSID to configure the
+            device via the web interface at http://192.168.4.1.
+
+    config WSPR_AP_PASS
+        string "SoftAP password (empty = open network)"
+        default ""
+        help
+            WPA2 password for the fallback SoftAP. Leave empty for an open
+            network (no authentication required).
+
+endmenu

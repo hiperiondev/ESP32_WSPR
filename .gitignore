@@ -51,5 +51,17 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
-# debug information files
-*.dwo
+.cproject
+.project
+Release
+.settings
+temp/
+vgcore*
+.metadata/
+build/
+dependencies.lock
+managed_components/
+sdkconfig.old
+.clangd
+gdbstub_*
+hs_err_pid*
