@@ -209,7 +209,7 @@ CLK0      ──── LPF input (via matching network)
 #### AD9850 DDS
 
 ```
-ESP32              AD9850 module
+ESP32                   AD9850 module
 AD9850_CLK_GPIO    ──── W_CLK
 AD9850_FQ_UD_GPIO  ──── FQ_UD
 AD9850_DATA_GPIO   ──── D7 / DATA (serial mode)
@@ -227,12 +227,12 @@ OUT1               ──── LPF input (sine wave output)
 ### Filter bank wiring
 
 ```
-ESP32          BCD decoder / relay driver board
-GPIO_A (bit 0) ──── A input
-GPIO_B (bit 1) ──── B input
-GPIO_C (bit 2) ──── C input
-3.3 V          ──── Logic VCC
-GND            ──── GND
+ESP32                BCD decoder / relay driver board
+GPIO_A (bit 0)  ──── A input
+GPIO_B (bit 1)  ──── B input
+GPIO_C (bit 2)  ──── C input
+3.3 V           ──── Logic VCC
+GND             ──── GND
 ```
 
 Eight filter positions (0–7) are selected by the 3-bit binary code on GPIO_A/B/C. The firmware selects the correct filter for each band automatically using the `BAND_FILTER[]` table in `config.c`.
