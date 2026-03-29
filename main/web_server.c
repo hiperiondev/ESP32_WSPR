@@ -52,7 +52,10 @@ static const char INDEX_HTML[] =
     "*{box-sizing:border-box;margin:0;padding:0}"
     "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;"
     "min-height:100vh;padding:20px}"
-    "h1{text-align:center;color:var(--accent);margin-bottom:20px;font-size:1.6em}"
+    "h1{text-align:center;color:var(--accent);margin-bottom:6px;font-size:1.6em}"
+    // ADDED: style for the reboot info subtitle line below the h1
+    ".reboot-info{text-align:center;color:var(--sub);font-size:.78em;margin-bottom:16px;"
+    "min-height:1.2em;letter-spacing:.01em}"
     ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;max-width:900px;margin:0 auto}"
     ".card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px}"
     ".card h2{color:var(--accent);font-size:1em;margin-bottom:14px;display:flex;align-items:center;gap:8px}"
@@ -124,6 +127,8 @@ static const char INDEX_HTML[] =
     ".btn-reset:hover{background:var(--red);color:#fff}"
     "</style></head><body>"
     "<h1>&#128225; WSPR Transmitter</h1>"
+    // ADDED: reboot info subtitle div — populated by JS after the first status poll
+    "<div id='reboot_info' class='reboot-info'></div>"
     "<button class='btn-reset' onclick='resetESP()'>&#9211; Reset ESP32</button>"
     "<div class='grid'>"
 
@@ -224,6 +229,8 @@ static const char INDEX_HTML[] =
 
     "let _hasPass=false;"
     "let _passEdited=false;"
+    // ADDED: flag to avoid re-writing the reboot subtitle on every status poll
+    "let _rebootInfoSet=false;"
 
     "function buildBands(enabled){"
     "const c=document.getElementById('bands');c.innerHTML='';"
@@ -251,7 +258,6 @@ static const char INDEX_HTML[] =
     "document.getElementById('hop_en').checked=!!cfg.hop_enabled;"
     "document.getElementById('hop_interval').value=cfg.hop_interval_sec||120;"
     "document.getElementById('tx_duty_pct').value=cfg.tx_duty_pct!=null?cfg.tx_duty_pct:20;"
-    // ADDED: populate IARU region selector; default to 1 if field absent.
     "document.getElementById('iaru_region').value=cfg.iaru_region||1;"
     "buildBands(cfg.band_enabled||Array(12).fill(false));"
     "updateTxBtn(cfg.tx_enabled);"
@@ -318,6 +324,13 @@ static const char INDEX_HTML[] =
     "`<span class='badge ok'>ON</span>`:`<span class='badge err'>OFF</span>`;"
     "document.getElementById('s_sym').textContent=s.tx_active?(s.symbol_idx+'/162'):'---';"
     "updateTxBtn(s.tx_enabled);"
+    // ADDED: populate reboot subtitle once after boot_time_str or reboot_reason arrive
+    "if(!_rebootInfoSet&&(s.boot_time_str||s.reboot_reason)){"
+    "let ri='';"
+    "if(s.boot_time_str)ri+='" WEBUI_REBOOT_INFO_PREFIX "'+s.boot_time_str;"
+    "if(s.reboot_reason)ri+='" WEBUI_REBOOT_CAUSE_PREFIX "'+s.reboot_reason;"
+    "document.getElementById('reboot_info').textContent=ri;"
+    "_rebootInfoSet=true;}"
     "}catch(e){}}"
 
     "function toast(msg,type){"
@@ -396,6 +409,7 @@ static const char INDEX_HTML[] =
     "loadCfg();setInterval(pollStatus,2000);"
     "</script></body></html>";
 
+// ADDED: two new string fields for last-reboot time and reset cause
 typedef struct {
     bool time_ok;
     char time_str[24];
@@ -407,6 +421,9 @@ typedef struct {
     int symbol_idx;
     bool hw_ok;
     char hw_name[32];
+    // ADDED: last reboot wall-clock timestamp and reset reason string
+    char reboot_time_str[32];
+    char reboot_reason[32];
 } wspr_status_t;
 
 static wspr_status_t _status = { 0 };
@@ -451,6 +468,22 @@ void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
         }
     }
     ESP_LOGI("web", "HW status: %s — %s", hw_ok ? "OK" : "DUMMY", _status.hw_name);
+}
+
+// ADDED: store last reboot time and/or reset reason in the status cache.
+// Either argument may be NULL to leave the stored value unchanged.
+void web_server_set_reboot_info(const char *boot_time_str, const char *reason_str) {
+    if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (boot_time_str) {
+            strncpy(_status.reboot_time_str, boot_time_str, sizeof(_status.reboot_time_str) - 1);
+            _status.reboot_time_str[sizeof(_status.reboot_time_str) - 1] = '\0';
+        }
+        if (reason_str) {
+            strncpy(_status.reboot_reason, reason_str, sizeof(_status.reboot_reason) - 1);
+            _status.reboot_reason[sizeof(_status.reboot_reason) - 1] = '\0';
+        }
+        xSemaphoreGive(_status_mutex);
+    }
 }
 
 void web_server_cfg_lock(void) {
@@ -513,7 +546,6 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     cJSON_AddBoolToObject(j, "tx_enabled", _cfg->tx_enabled);
     cJSON_AddNumberToObject(j, "tx_duty_pct", _cfg->tx_duty_pct);
     cJSON_AddNumberToObject(j, "xtal_cal_ppb", (double)_cfg->xtal_cal_ppb);
-    // ADDED: send iaru_region so the web UI can pre-select the correct option.
     cJSON_AddNumberToObject(j, "iaru_region", (double)_cfg->iaru_region);
 
     cJSON *bands = cJSON_CreateArray();
@@ -634,7 +666,7 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     if ((v = cJSON_GetObjectItem(j, "iaru_region")) && cJSON_IsNumber(v)) {
         int region = v->valueint;
         if (region < 1 || region > 3)
-            region = 1; // clamp to Region 1 on bad input
+            region = 1;
         _cfg->iaru_region = (uint8_t)region;
     }
 
@@ -682,6 +714,7 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ADDED: reboot_time_str and reboot_reason are now included in every status response
 static esp_err_t h_status(httpd_req_t *req) {
     wspr_status_t snap = { 0 };
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -700,6 +733,9 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON_AddBoolToObject(j, "tx_active", snap.tx_active);
     cJSON_AddBoolToObject(j, "tx_enabled", snap.tx_enabled);
     cJSON_AddNumberToObject(j, "symbol_idx", snap.symbol_idx);
+    // ADDED: expose reboot info so the UI subtitle is populated from the API
+    cJSON_AddStringToObject(j, "boot_time_str", snap.reboot_time_str);
+    cJSON_AddStringToObject(j, "reboot_reason", snap.reboot_reason);
     char *s = cJSON_PrintUnformatted(j);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, s, strlen(s));

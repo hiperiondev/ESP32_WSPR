@@ -96,3 +96,7 @@
 #define WEBUI_JS_PASS_SAVED       "(contrase\\u00f1a guardada)"
 #define WEBUI_JS_CONFIRM_RESET    "\\u00bfReiniciar el ESP32?"
 #define WEBUI_JS_RESTARTING       "Reiniciando..."
+
+// ADDED: reboot info subtitle strings shown below the page title
+#define WEBUI_REBOOT_INFO_PREFIX  "Inicio: "
+#define WEBUI_REBOOT_CAUSE_PREFIX " \u2502 Causa: "
