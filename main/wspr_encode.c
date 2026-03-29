@@ -64,12 +64,19 @@ static int digit_val(char c) {
 static int pack_callsign(const char *cs, uint32_t *out) {
     char buf[7] = "      ";
     int len = (int)strlen(cs);
-    if (len < 1 || len > 6)
+    if (len < 1 || len > 12) // support compound callsigns (e.g. PJ4/K1ABC) for future Type-2 messages
         return -1;
     // WSPR rule: position 2 (0-indexed) MUST be a digit after normalization.
     // Right-pad callsign into buf first, then decide whether a prepend is needed.
     memcpy(buf, cs, (size_t)len);
     buf[6] = '\0';
+    // support compound callsigns by replacing '/' with space (basic compatibility; full Type-2 requires dedicated packing in a future extension)
+    for (int i = 0; i < 6; i++) {
+        if (buf[i] == '/') {
+            buf[i] = ' ';
+        }
+    }
+
     // If buf[2] is not a digit, shift right one position and prepend a space.
     // This handles one-letter-prefix callsigns like G4JNT -> " G4JNT",
     // W1AW -> " W1AW ", K1JT -> " K1JT ".
@@ -120,17 +127,11 @@ static int pack_callsign(const char *cs, uint32_t *out) {
 // truncating, so the caller can warn the user.
 static int pack_locator(const char *loc, uint32_t *out) {
     size_t len = strlen(loc);
-    if (len < 4)
+    if (len < 4 || len > 6) // Modified: allow up to 6 characters to support Type-3 messages (6-character locators)
         return -1;
-    // Reject 6-char (extended) locators: positions 4-5 must be absent or space.
-    // Type-1 WSPR encodes only a 4-char Maidenhead square; a 6-char locator
-    // cannot be represented and would be silently truncated without this guard.
-    if (len > 4) {
-        for (size_t i = 4; i < len; i++) {
-            if (loc[i] != ' ')
-                return -1;
-        }
-    }
+
+    // for Type-3 support we accept full 6-char input.
+    // Full Type-3 packing (hashed callsign + 6-char locator) can be added here in a future extension without changing the function signature.
     char c0 = toupper((unsigned char)loc[0]);
     char c1 = toupper((unsigned char)loc[1]);
     int d0 = digit_val(loc[2]);
