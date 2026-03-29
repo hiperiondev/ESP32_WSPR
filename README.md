@@ -49,8 +49,6 @@
 
 ## About The Project
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 **ESP32\_WSPR** is a complete, standalone WSPR (Weak Signal Propagation Reporter) beacon transmitter firmware built on Espressif's **ESP-IDF** framework for the ESP32 microcontroller family. Unlike most hobby WSPR projects that rely on the Arduino ecosystem, this firmware is written in pure C against the native ESP-IDF APIs, giving it access to FreeRTOS task management, the native SNTP client, the `esp_wifi` stack, `nvs_flash` persistent storage, and the `esp_http_server` web server — all without the overhead of the Arduino HAL.
 
 The project is designed to be production-ready for unattended beacon operation: it encodes WSPR Type-1 messages entirely on-chip, drives an RF oscillator (Si5351A or AD9850) with sub-Hz symbol resolution, selects the correct band-pass / low-pass filter automatically via a 3-bit GPIO bus, synchronises time via NTP or GPS, and exposes a responsive single-page web application for configuration and monitoring. All user settings are persisted in the ESP32's NVS (non-volatile storage) flash partition and survive power cycles.
@@ -69,8 +67,6 @@ The WSPR mode occupies roughly 6 Hz of RF bandwidth and can be decoded at signal
 ---
 
 ## WSPR Protocol Overview
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 WSPR (**W**eak **S**ignal **P**ropagation **R**eporter, pronounced *"whisper"*) is a digital amateur radio protocol designed by Joe Taylor (K1JT), Nobel Prize winner in Physics, and originally released in 2008. It is part of the WSJT-X suite and has become one of the most widely used propagation beacon modes in amateur radio.
 
@@ -152,8 +148,6 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 
 ## Features
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 - ✅ **Full WSPR Type-1 encoder** — callsign packing, convolutional encoding (K=32, rate 1/2), bit-reversal interleaving, sync vector overlay; integer-only arithmetic
 - ✅ **Dual oscillator support** — Si5351A (I2C, auto-detected) and AD9850 (GPIO bit-bang, assumed present); graceful dummy mode if neither found
 - ✅ **12 WSPR bands** — 2200 m through 10 m (137 kHz to 28 MHz)
@@ -174,8 +168,6 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 ---
 
 ## Hardware Requirements
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 ### Minimum
 
@@ -248,8 +240,6 @@ Eight filter positions (0–7) are selected by the 3-bit binary code on GPIO_A/B
 ---
 
 ## Architecture & Source Code
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 The firmware is organised as a single ESP-IDF component (`main/`). All source files are compiled together via `CMakeLists.txt` using `GLOB_RECURSE`.
 
@@ -341,8 +331,6 @@ typedef struct {
 ---
 
 ## Web Interface (WebUI)
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 The web interface is a single-page application (SPA) served entirely from flash memory as a C string literal embedded in `web_server.c`. No filesystem component (SPIFFS/LittleFS) is needed. The interface auto-refreshes status data every 2 seconds via the `/api/status` endpoint.
 
@@ -546,8 +534,6 @@ The web server exposes the following endpoints:
 
 ## Configuration Reference
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 ### Default values (applied when no NVS config is found)
 
 | Parameter | Default | Notes |
@@ -567,8 +553,6 @@ The web server exposes the following endpoints:
 ---
 
 ## Building & Flashing
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 ### Prerequisites
 
@@ -618,8 +602,6 @@ The default ESP-IDF partition table includes a `nvs` partition large enough for 
 ---
 
 ## Menuconfig Options (Kconfig)
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 All build-time parameters are exposed through `Kconfig.projbuild` under the menu **"WSPR Transmitter Configuration"**.
 
@@ -695,8 +677,6 @@ A `static_assert` in `gpio_filter.c` enforces that no two filter GPIOs share the
 
 ## Low-Pass Filter Bank
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 A low-pass filter (LPF) is **legally required** in virtually all jurisdictions to suppress harmonics before connecting the oscillator output to an antenna. The Si5351A output is a square wave rich in odd harmonics; without filtering, the third harmonic of a 7 MHz signal would appear at 21 MHz, and so on.
 
 The firmware drives a 3-bit binary address bus (GPIO_A = bit 0, GPIO_B = bit 1, GPIO_C = bit 2) that selects one of up to eight filter positions via a BCD decoder (e.g. 74HC138) or a relay-driver board. The mapping from band to filter ID is defined in `BAND_FILTER[]` in `config.c`:
@@ -735,8 +715,6 @@ For each filter, design a **T-network low-pass filter** (rather than a Pi networ
 
 ## Oscillator Hardware
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 ### Si5351A (preferred)
 
 The **Si5351A** is a highly versatile I2C-programmable clock generator manufactured by Silicon Laboratories (now Skyworks). It is the preferred oscillator for WSPR beacons because:
@@ -770,8 +748,6 @@ If neither oscillator is found (Si5351 I2C probe fails, AD9850 GPIO init fails),
 
 ## Time Synchronisation
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 Accurate UTC time is **essential** for WSPR. Transmissions that start more than ±1–2 seconds off the even-minute boundary will not be decoded. The firmware supports two time sources, selected at compile time via Kconfig.
 
 ### NTP mode (`CONFIG_WSPR_TIME_NTP`)
@@ -791,8 +767,6 @@ GPS mode is independent of Wi-Fi, making it suitable for portable or remote beac
 ---
 
 ## Wi-Fi & Networking
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 ### STA mode (station)
 
@@ -820,8 +794,6 @@ The `GET /api/wifi_scan` endpoint triggers a blocking scan (~2 s) that returns a
 ---
 
 ## WSPR Band Frequencies & IARU Regions
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 The firmware stores dial frequencies for all 12 bands and all 3 IARU regions in the table `BAND_FREQ_HZ[3][BAND_COUNT]` in `config.c`. The inline function `config_band_freq_hz(region, band)` selects the correct entry.
 
@@ -854,8 +826,6 @@ Set the region in the **IARU Region** card of the web UI. The selection is saved
 
 ## Frequency Hopping Mode
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 When `hop_enabled = true`, the `scheduler_task` rotates through the list of enabled bands after each `hop_interval_sec` seconds. The hop state (current band index, time-on-band counter) is maintained in task-local variables and resets on each firmware boot.
 
 **Hop logic:**
@@ -870,8 +840,6 @@ If only one band is enabled, hopping is effectively disabled (the single band is
 
 ## TX Duty Cycle
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 The WSPR protocol recommends that stations transmit no more than 20% of the time, leaving the other 80% for receiving. This is both a good operating practice and a courtesy to other users who may be listening on the same frequency.
 
 The firmware implements duty cycle as a random slot gate: before each 2-minute slot, a random number in [0, 99] is drawn; if it is less than `tx_duty_pct`, the slot is used for transmission. Otherwise, the slot is skipped and the scheduler waits for the next one.
@@ -883,8 +851,6 @@ The firmware implements duty cycle as a random slot gate: before each 2-minute s
 ---
 
 ## Crystal Calibration
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 Even high-quality crystals deviate from their nominal frequency by tens to hundreds of parts per million. For WSPR, the transmit frequency must be within ±200 Hz of the dial frequency (the receiver window is only about ±100 Hz), so calibration is important.
 
@@ -919,8 +885,6 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 
 ## Implementation Status
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 | Feature | Status |
 |---|---|
 | WSPR Type-1 encoder (callsign + locator + power) | ✅ Complete |
@@ -949,8 +913,6 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 
 ## Roadmap
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 Planned features and improvements for future releases:
 
 - [ ] **WSPR Type-2 / Type-3 messages** — compound callsigns and 6-character locators
@@ -967,8 +929,6 @@ Planned features and improvements for future releases:
 ---
 
 ## Contributing
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
 
@@ -991,8 +951,6 @@ If you have a suggestion that would make this better, please fork the repo and c
 
 ## License
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 Distributed under the **GNU General Public License v3.0**. See `LICENSE.txt` for more information.
 
 ```
@@ -1010,8 +968,6 @@ The WSPR encoding algorithm is based on the original WSJT-X source code by Joe T
 
 ## Contact
 
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
-
 *Emiliano Augusto Gonzalez — [egonzalez.hiperion@gmail.com](mailto:egonzalez.hiperion@gmail.com)*
 
 Project Link: [https://github.com/hiperiondev/ESP32\_WSPR](https://github.com/hiperiondev/ESP32_WSPR)
@@ -1019,8 +975,6 @@ Project Link: [https://github.com/hiperiondev/ESP32\_WSPR](https://github.com/hi
 ---
 
 ## References
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 ### WSPR Protocol
 
@@ -1059,7 +1013,5 @@ Project Link: [https://github.com/hiperiondev/ESP32\_WSPR](https://github.com/hi
 <div align="center">
 
 *73 de LU3VEA — Happy DXing!*
-
-[![backtotop](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/backtotop.png)](#readme-top)
 
 </div>
