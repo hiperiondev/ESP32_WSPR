@@ -64,6 +64,12 @@ The WSPR mode occupies roughly 6 Hz of RF bandwidth and can be decoded at signal
 - **Multilingual WebUI** — English and Spanish UI string tables are provided as separate headers (`webui_en.h` / `webui_es.h`) selected at compile time via Kconfig.
 - **Graceful degradation** — missing oscillator hardware, lost Wi-Fi, unavailable NTP, and corrupted NVS blobs are all handled without crashing, with informative log messages and web UI status indicators.
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## WSPR Protocol Overview
@@ -144,6 +150,12 @@ WSPR transmissions **must** begin at the start of an even UTC minute (00:00, 00:
 
 The WSPR community standard recommends transmitting in at most 20% of available 2-minute slots, leaving the remainder for receiving. This firmware implements a configurable duty cycle percentage (0–100%) and a random slot-selection mechanism to distribute transmissions across time and avoid systematic collisions with other beacons.
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## Features
@@ -164,6 +176,12 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 - ✅ **Multilingual UI** — English and Spanish (compile-time selection via Kconfig)
 - ✅ **WSPRnet integration** — direct link from the WebUI to your station's spot map
 - ✅ **ESP-IDF native** — no Arduino dependency; uses FreeRTOS, esp_wifi, esp_sntp, esp_http_server, nvs_flash, driver/i2c, driver/gpio, driver/uart
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -236,6 +254,12 @@ GND             ──── GND
 ```
 
 Eight filter positions (0–7) are selected by the 3-bit binary code on GPIO_A/B/C. The firmware selects the correct filter for each band automatically using the `BAND_FILTER[]` table in `config.c`.
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -327,6 +351,12 @@ typedef struct {
     uint8_t  iaru_region;           // IARU region: 1, 2, or 3
 } wspr_config_t;
 ```
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -472,6 +502,12 @@ The live **Status panel** (updated every 2 seconds) shows:
 
 A **WSPRnet** link at the bottom of the page opens the spot map for your callsign directly.
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ### REST API
@@ -528,6 +564,12 @@ The web server exposes the following endpoints:
 }
 ```
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## Configuration Reference
@@ -547,6 +589,12 @@ The web server exposes the following endpoints:
 | TX duty cycle | 20% | WSPR standard |
 | XTAL cal | 0 ppb | No correction |
 | IARU region | 1 (Europe) | — |
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -596,6 +644,12 @@ Use `Ctrl+]` to exit the monitor.
 ### Partition table
 
 The default ESP-IDF partition table includes a `nvs` partition large enough for the `wspr_config_t` blob. No custom partition table is needed.
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -671,6 +725,12 @@ A `static_assert` in `gpio_filter.c` enforces that no two filter GPIOs share the
 | English | `CONFIG_WEBUI_LANG_EN` |
 | Spanish | `CONFIG_WEBUI_LANG_ES` |
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## Low-Pass Filter Bank
@@ -708,6 +768,12 @@ For each filter, design a **T-network low-pass filter** (rather than a Pi networ
 | LPF-5 | 20 m / 17 m | 20 MHz |
 | LPF-6 | 15 m / 12 m | 26 MHz |
 | LPF-7 | 10 m | 32 MHz |
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -762,6 +828,12 @@ Typical accuracy: ±1 s (limited by the 1 Hz NMEA sentence rate and UART latency
 
 GPS mode is independent of Wi-Fi, making it suitable for portable or remote beacon installations without internet access.
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## Wi-Fi & Networking
@@ -788,6 +860,12 @@ When in AP-only mode with saved STA credentials, a periodic `esp_timer` fires ev
 ### Wi-Fi scan
 
 The `GET /api/wifi_scan` endpoint triggers a blocking scan (~2 s) that returns a JSON array of nearby access points with SSID, RSSI, and security type. In AP-only mode, the scan temporarily elevates to APSTA mode, waits 150 ms for the STA interface to initialise, scans, then returns to AP mode. Results are capped at 20 entries for HTTP payload efficiency.
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -819,6 +897,12 @@ All frequencies are **dial frequencies** in Hz. The actual transmitted RF freque
 ### Selecting your IARU region
 
 Set the region in the **IARU Region** card of the web UI. The selection is saved to NVS. The `iaru_region` field in `wspr_config_t` stores values 1, 2, or 3; an invalid stored value is automatically corrected to 1 at boot.
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -879,6 +963,12 @@ freq_cal = freq_nominal * (1 - cal_ppb / 1e9)
 
 Alternatively, WSPRnet reception reports include the frequency offset in Hz measured by the receiving station; this can be used directly to estimate the calibration error.
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## Implementation Status
@@ -907,6 +997,12 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 | WSPRnet spot link | ✅ Complete |
 | Reboot info (boot time, reset cause) in status | ✅ Complete |
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## Roadmap
@@ -923,6 +1019,12 @@ Planned features and improvements for future releases:
 - [ ] **WSPRnet automatic upload** — direct HTTP upload of received spots (requires SDR RX)
 - [ ] **6 m and 4 m band support** — extend frequency table for VHF WSPR
 - [ ] **SPI display support** — optional OLED/TFT status display
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -945,6 +1047,12 @@ If you have a suggestion that would make this better, please fork the repo and c
 - No floating-point arithmetic in oscillator or encoding code paths.
 - New Kconfig options must be documented in this README.
 
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
+
 ---
 
 ## License
@@ -961,6 +1069,12 @@ the Free Software Foundation, either version 3 of the License, or
 ```
 
 The WSPR encoding algorithm is based on the original WSJT-X source code by Joe Taylor (K1JT) and the protocol description by Andy Talbot (G4JNT). All algorithms are used with respect for the original authors' contributions to amateur radio.
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
+</div>
 
 ---
 
@@ -1012,4 +1126,10 @@ Project Link: [https://github.com/hiperiondev/ESP32\_WSPR](https://github.com/hi
 
 *73 de LU3VEA — Happy DXing!*
 
+</div>
+
+<div align="right">
+  <a href="#readme-top">
+    <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
+  </a>
 </div>
