@@ -194,4 +194,39 @@ menu "WSPR Transmitter"
 
     endchoice
 
+    config WSPR_TASK_WDT_ENABLE
+        bool "Enable task watchdog for scheduler task"
+        default n
+        help
+            Register the WSPR scheduler task with the ESP-IDF task watchdog.
+            When enabled, esp_task_wdt_add() is called at scheduler_task startup
+            and esp_task_wdt_reset() is called once per WSPR symbol (every ~683 ms)
+            during transmission. The watchdog fires if the scheduler task stalls
+            for longer than the WDT timeout configured in Component config.
+            Disable if using the default IDF task watchdog configuration or if
+            the WDT is not enabled in sdkconfig.
+
+    config WSPR_SYMBOL_OVERRUN_LOG
+        bool "Log symbol timing overruns"
+        default y
+        help
+            Emit a ESP_LOGW warning if the wall-clock time at which a WSPR symbol
+            is programmed exceeds the ideal deadline by more than 10 ms.
+            The log message includes the symbol index and the overrun in microseconds
+            to help identify scheduling jitter during initial hardware calibration.
+            Disable to suppress this log output during normal operation.
+
+    config WSPR_LPF_SETTLE_MS
+        int "LPF relay settle time (ms)"
+        default 10
+        range 5 100
+        help
+            Time in milliseconds to wait after asserting the low-pass filter relay
+            GPIO before enabling the oscillator RF output. Mechanical relay contacts
+            need 5-20 ms to fully close; solid-state relays may need only 1-2 ms.
+            The minimum of 5 ms is conservative enough for most mechanical relays.
+            Increase to 20-50 ms if audible relay chatter or RF leakage is observed
+            at band transitions. This delay occurs once per transmission, before the
+            first WSPR symbol, and does not affect symbol timing accuracy.
+
 endmenu

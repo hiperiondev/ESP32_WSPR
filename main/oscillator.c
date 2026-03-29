@@ -248,6 +248,13 @@ static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
 // Verification 100 MHz: 4294967/100 = 42949  vs  4294967296/100000 = 42949  [identical]
 // No 64-bit intermediate produced; compiler evaluates entirely at compile-time.
 #define AD9850_SCALE_KHZ (4294967UL / ((uint32_t)AD9850_REF_CLK / 1000000UL))
+// ADDED 3.27: compile-time overflow guard for the AD9850 frequency-tuning word.
+// Max WSPR frequency: 28 126 100 Hz (10 m dial) + 1500 Hz offset + 4395 mHz symbol
+// offset ~ 28 128 kHz. Verify that freq_khz * AD9850_SCALE_KHZ fits in uint32_t.
+// For 125 MHz ref: 28200 * 34359 = 968 922 600 < 0xFFFFFFFF. Safe for all WSPR bands.
+// Note: this assert uses the compile-time ref_mhz divisor matching the macro above.
+static_assert((28200UL * (4294967UL / ((uint32_t)AD9850_REF_CLK / 1000000UL))) < 0xFFFFFFFFUL,
+    "AD9850 FTW overflow: max WSPR frequency word must fit in 32 bits for the configured ref clock");
 
 static uint32_t ad9850_freq_word(uint32_t freq_hz) {
     if (_ad_cal != 0) {

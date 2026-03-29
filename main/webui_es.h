@@ -102,3 +102,7 @@
 // ADDED: reboot info subtitle strings shown below the page title
 #define WEBUI_REBOOT_INFO_PREFIX  "Inicio: "
 #define WEBUI_REBOOT_CAUSE_PREFIX " \u2502 Causa: "
+
+// ADDED 3.24: mensajes de error de validacion en cliente para indicativo y localizador
+#define WEBUI_JS_ERR_CALLSIGN "Indicativo inv\u00e1lido (3-11 car., solo A-Z 0-9 y espacio)"
+#define WEBUI_JS_ERR_LOCATOR  "Localizador inv\u00e1lido (4 car.: formato AA00, ej. GF05)"

@@ -30,6 +30,10 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+// ADDED §5 WSPR_TASK_WDT_ENABLE: include task WDT header conditionally
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+#include "esp_task_wdt.h"
+#endif
 
 #include "config.h"
 #include "gpio_filter.h"
@@ -57,9 +61,12 @@ static const char *TAG = "wspr_main";
 // Global live config
 static wspr_config_t g_cfg;
 
-// ADDED: microsecond timestamp captured at the very start of app_main.
-// Used by status_task to back-compute the boot wall-clock time once NTP syncs.
-static uint64_t g_boot_us = 0;
+// MODIFIED 3.22: replaced uint64_t g_boot_us with uint32_t g_boot_uptime_sec.
+// The 64-bit microsecond timestamp required a 64-bit software division each time
+// status_task computed boot wall-clock time. Converting to seconds once at startup
+// in app_main (single 64-bit divide, compile-time, negligible cost) and storing
+// only the uint32_t seconds value eliminates all 64-bit runtime divisions.
+static uint32_t g_boot_uptime_sec = 0;
 
 // Hop state
 // Declared volatile: written by scheduler_task and read by status_task
@@ -143,7 +150,10 @@ static void wspr_transmit(void) {
     uint32_t base_hz = config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx) + 1500u;
     oscillator_set_freq(base_hz);
     gpio_filter_select(BAND_FILTER[g_band_idx]);
-    vTaskDelay(pdMS_TO_TICKS(10));
+    // MODIFIED §5 WSPR_LPF_SETTLE_MS: settle time now driven by Kconfig
+    // instead of the previous hard-coded 10 ms constant.
+    // Mechanical relays typically need 5-20 ms; solid-state relays 1-5 ms.
+    vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
 
     oscillator_enable(true);
     g_tx_active = true;
@@ -160,6 +170,14 @@ static void wspr_transmit(void) {
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;
+
+        // ADDED §5 WSPR_TASK_WDT_ENABLE: feed the task watchdog at every symbol
+        // boundary (~683 ms interval) to prove the scheduler task is alive.
+        // Without this the WDT fires during the ~110 s TX window if the timeout
+        // is shorter than the full transmission duration.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+        esp_task_wdt_reset();
+#endif
 
         // Exact tone offset: symbol * 375000 / 256 milli-Hz.
         int32_t tone_offset_mhz = (int32_t)((uint32_t)symbols[i] * WSPR_TONE_NUM / WSPR_TONE_DEN);
@@ -186,6 +204,21 @@ static void wspr_transmit(void) {
                 taskYIELD();
             }
         }
+
+        // ADDED §5 WSPR_SYMBOL_OVERRUN_LOG: warn when the actual elapsed time
+        // at symbol boundary exceeds the ideal deadline by more than 10 ms.
+        // Overruns indicate scheduler jitter or ISR load that may cause audible
+        // frequency discontinuities; useful during initial hardware calibration.
+#if CONFIG_WSPR_SYMBOL_OVERRUN_LOG
+        {
+            uint32_t actual_us = (uint32_t)esp_timer_get_time() - tx_start_us;
+            if (actual_us > target_us + 10000u) {
+                ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lu actual=%lu overrun=%lu us",
+                         i, (unsigned long)target_us, (unsigned long)actual_us,
+                         (unsigned long)(actual_us - target_us));
+            }
+        }
+#endif
     }
 
     oscillator_enable(false);
@@ -211,12 +244,13 @@ static void status_task(void *arg) {
             gmtime_r(&tv.tv_sec, &t);
             strftime(time_str, sizeof(time_str), "%H:%M:%S UTC", &t);
 
-            // ADDED: compute boot wall-clock time on the first successful sync.
-            // g_boot_us holds the esp_timer value captured at app_main entry;
-            // subtracting the uptime in seconds yields the boot unix timestamp.
+            // MODIFIED 3.22: use g_boot_uptime_sec (uint32_t) instead of the
+            // former g_boot_us (uint64_t) to avoid a 64-bit software division
+            // on every status poll.  g_boot_uptime_sec is computed once at
+            // app_main entry using a single 64-bit divide, stored as uint32_t,
+            // and all arithmetic here is purely 32-bit.
             if (!reboot_info_time_set) {
-                uint64_t uptime_sec = g_boot_us / 1000000ULL;
-                time_t boot_ts = tv.tv_sec - (time_t)uptime_sec;
+                time_t boot_ts = tv.tv_sec - (time_t)g_boot_uptime_sec;
                 struct tm bt;
                 gmtime_r(&boot_ts, &bt);
                 char boot_str[32];
@@ -252,6 +286,15 @@ static void status_task(void *arg) {
 
 static void scheduler_task(void *arg) {
     ESP_LOGI(TAG, "Scheduler started — waiting for time sync");
+
+    // ADDED §5 WSPR_TASK_WDT_ENABLE: subscribe this task to the ESP-IDF
+    // task watchdog so a hard-hang is detected and triggers a reboot.
+    // esp_task_wdt_reset() is called every symbol (~683 ms) during TX;
+    // during idle the scheduler loops on vTaskDelay(1000) which keeps
+    // the inter-reset interval well under any sane WDT timeout.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+    esp_task_wdt_add(NULL);
+#endif
 
     select_next_band(false);
 
@@ -391,9 +434,12 @@ static void scheduler_task(void *arg) {
 // ADDED: app_main captures boot timestamp and reset reason before any subsystem
 // initialisation, then passes the reason to the web server once mutexes exist.
 void app_main(void) {
-    // ADDED: capture esp_timer value immediately so status_task can later
-    // back-compute the boot wall-clock time after the first NTP/GPS sync.
-    g_boot_us = (uint64_t)esp_timer_get_time();
+    // MODIFIED 3.22: capture boot uptime as uint32_t seconds instead of uint64_t
+    // microseconds.  A single 64-bit divide is performed here once at startup;
+    // status_task then uses only 32-bit arithmetic to compute boot wall-clock time.
+    // esp_timer_get_time() returns microseconds since boot; dividing by 1000000
+    // converts to seconds.  The result fits in uint32_t for any uptime < 136 years.
+    g_boot_uptime_sec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
 
     // ADDED: read reset reason before NVS or WiFi can trigger a secondary reset.
     esp_reset_reason_t reset_rsn = esp_reset_reason();

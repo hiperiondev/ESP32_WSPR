@@ -101,3 +101,7 @@
 // ADDED: reboot info subtitle strings shown below the page title
 #define WEBUI_REBOOT_INFO_PREFIX  "Boot: "
 #define WEBUI_REBOOT_CAUSE_PREFIX " \u2502 Cause: "
+
+// ADDED 3.24: client-side validation error messages for callsign and locator
+#define WEBUI_JS_ERR_CALLSIGN "Invalid callsign (3-11 chars, A-Z 0-9 and space only)"
+#define WEBUI_JS_ERR_LOCATOR  "Invalid locator (4 chars: AA00 format, e.g. GF05)"

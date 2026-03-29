@@ -299,6 +299,14 @@ static const char INDEX_HTML[] =
     "if(_passEdited){"
     "body.wifi_pass=document.getElementById('wifi_pass').value;"
     "}"
+    // MODIFIED 3.24: client-side validation before POST to give immediate feedback.
+    // Mirrors the server-side validate_callsign() and validate_locator() rules.
+    // Callsign: 3-11 chars, only A-Z 0-9 and space (no slash — encoder rejects it).
+    // Locator: exactly 4 chars matching [A-Ra-r][A-Ra-r][0-9][0-9].
+    "if(!body.callsign||body.callsign.length<3||!/^[A-Z0-9 ]{3,11}$/.test(body.callsign)){"
+    "toast('\u274c " WEBUI_JS_ERR_CALLSIGN "','err');return;}"
+    "if(!body.locator||!/^[A-Ra-r]{2}[0-9]{2}$/.test(body.locator)){"
+    "toast('\u274c " WEBUI_JS_ERR_LOCATOR "','err');return;}"
     "try{"
     "const r=await fetch('/api/config',{method:'POST',"
     "headers:{'Content-Type':'application/json'},"
@@ -517,11 +525,16 @@ void web_server_cfg_unlock(void) {
 
 static bool validate_callsign(const char *s) {
     int len = (int)strlen(s);
+    // MODIFIED 3.24: minimum length is 3 (e.g. "N0X"), maximum is CALLSIGN_LEN-1.
+    // '/' was removed from the allowed set: wspr_encode pack_callsign() uses
+    // char_to_wspr() which maps only 0-9, A-Z, and space (returning -1 for '/'),
+    // so accepting '/' here would pass server validation but fail encoding.
     if (len < 3 || len > CALLSIGN_LEN - 1)
         return false;
     for (int i = 0; i < len; i++) {
         char c = (char)toupper((unsigned char)s[i]);
-        if (!isalnum((unsigned char)c) && c != '/')
+        // Only alphanumeric and space are valid WSPR callsign characters
+        if (!isalnum((unsigned char)c) && c != ' ')
             return false;
     }
     return true;
