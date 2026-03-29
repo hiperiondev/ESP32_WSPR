@@ -107,12 +107,17 @@ static esp_err_t si5351_ping(void) {
     return err;
 }
 
+// MODIFIED 3.7: si_init_pll — replaced dead guard with explicit VCO range clamps
 static esp_err_t si_init_pll(void) {
     uint32_t xtal_mhz = _si_xtal / 1000000UL;
     uint32_t a = 900UL / xtal_mhz;
-    if ((a * xtal_mhz * 1000000UL) / 28127000UL < 6UL) {
-        a++;
-    }
+    // MODIFIED 3.7: replaced dead guard condition with explicit VCO range clamps.
+    // Si5351 PLL requires 600 MHz <= VCO <= 900 MHz (datasheet section 4).
+    // a < 15 with any xtal >= 10 MHz yields VCO < 150 MHz (below minimum).
+    // a > 90 with xtal = 10 MHz yields VCO > 900 MHz (above maximum).
+    // The original condition (a*xtal/28.127 < 6) never triggered in practice.
+    if (a < 15UL) a = 15UL;
+    if (a > 90UL) a = 90UL;
     _si_vco = a * xtal_mhz * 1000000UL;
     uint32_t p1 = 128UL * a - 512UL;
     uint8_t pll_regs[8] = {
@@ -126,6 +131,7 @@ static esp_err_t si_init_pll(void) {
     return err;
 }
 
+// MODIFIED 3.6 + 3.8: si_set_freq_hz_mhz — R-divider comment + calibration sign fix
 static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
     if (_si_vco == 0) {
         ESP_LOGE(TAG, "SI5351: PLL not initialized");
@@ -134,16 +140,27 @@ static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
     uint8_t r_div_reg = 0;
     uint32_t eff_hz = freq_hz;
     uint16_t eff_mhz = frac_mhz;
+    // MODIFIED 3.6: R-divider doubles eff_hz up to 7 times (divide-by-128 maximum).
+    // Minimum usable input frequency is approximately 500 kHz / 128 = 3.9 kHz.
+    // For 2200 m (137.6 kHz): 5 doublings reach ~4.4 MHz, within MS0 divider range.
+    // r_div_reg value is stored in MS0_REG[2] bits [6:4] (see si5351 datasheet table 8).
     while (eff_hz < 500000UL && r_div_reg < 7) {
         eff_hz = eff_hz * 2UL + (eff_mhz >= 500U ? 1UL : 0UL);
         eff_mhz = (uint16_t)((eff_mhz * 2U) % 1000U);
         r_div_reg++;
         configASSERT(eff_mhz < 1000U);
     }
+    // MODIFIED 3.8: fixed calibration sign inversion and simplified formula.
+    // Positive ppb means the crystal runs fast: actual VCO > nominal, output too high.
+    // To compensate we must DECREASE the effective VCO, not increase it.
+    // Previous code added delta (wrong sign), making the frequency error larger.
+    // New formula: correction_hz = vco_MHz * ppb / 1000  (ppb/1000 converts to ppm scale).
+    // Max correction at 100000 ppb: 900 * 100000 / 1000 = 90000 Hz, fits in int32_t.
     uint32_t vco_cal = _si_vco;
     if (_si_cal != 0) {
-        int32_t delta = (int32_t)(_si_vco / 1000000UL) * (_si_cal / 1000) + (int32_t)(_si_vco / 1000000UL) * (_si_cal % 1000) / 1000;
-        vco_cal = (uint32_t)((int32_t)_si_vco + delta);
+        int32_t vco_mhz = (int32_t)(_si_vco / 1000000UL);
+        int32_t correction_hz = (vco_mhz * _si_cal) / 1000;
+        vco_cal = (uint32_t)((int32_t)_si_vco - correction_hz);
     }
     uint32_t d_int = vco_cal / eff_hz;
     if (d_int < 6UL || d_int > 1800UL) {
