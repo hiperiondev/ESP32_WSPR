@@ -44,47 +44,55 @@
 // Bands card
 #define WEBUI_CARD_BANDS_TITLE "Bandas activas"
 
+// IARU region card strings in Spanish
+#define WEBUI_CARD_IARU_TITLE   "Regi&#243;n IARU y frecuencia en 60 m"
+#define WEBUI_LABEL_IARU_REGION "Regi&#243;n IARU"
+#define WEBUI_IARU_REGION_1     "Regi&#243;n 1 &mdash; Europa, &#193;frica, Oriente Medio (5,2886 MHz)"
+#define WEBUI_IARU_REGION_2     "Regi&#243;n 2 &mdash; Am&#233;ricas (5,3465 MHz)"
+#define WEBUI_IARU_REGION_3     "Regi&#243;n 3 &mdash; Asia, Pac&#237;fico (5,3670 MHz)"
+#define WEBUI_HINT_IARU                                                                                                                                        \
+    "Selecciona la frecuencia de marcado WSPR en 60 m seg&#250;n tu zona ITU/IARU. El resto de bandas usan la misma frecuencia en todo el mundo."
+
 // Hop card
-#define WEBUI_CARD_HOP_TITLE    "Salto de frecuencia"
-#define WEBUI_TOGGLE_HOP_LABEL  "Habilitar salto autom&#225;tico"
+#define WEBUI_CARD_HOP_TITLE     "Salto de frecuencia"
+#define WEBUI_TOGGLE_HOP_LABEL   "Habilitar salto autom&#225;tico"
 #define WEBUI_LABEL_HOP_INTERVAL "Intervalo (s):"
-#define WEBUI_HINT_HOP          "El transmisor rotar&#225; por las bandas seleccionadas cada N segundos (m&#237;n. 120 s = 1 TX)."
+#define WEBUI_HINT_HOP           "El transmisor rotar&#225; por las bandas seleccionadas cada N segundos (m&#237;n. 120 s = 1 TX)."
 
 // Duty cycle card
-#define WEBUI_CARD_DUTY_TITLE    "Ciclo de trabajo TX"
-#define WEBUI_LABEL_DUTY         "Porcentaje de slots TX activos (0-100 %)"
-#define WEBUI_HINT_DUTY_INLINE   "&nbsp;% (0=nunca, 20=est&#225;ndar WSPR, 100=siempre)"
-#define WEBUI_HINT_DUTY          "20% transmite 1 de cada 5 slots (recomendado WSPR). 100% usa todos los slots disponibles."
+#define WEBUI_CARD_DUTY_TITLE  "Ciclo de trabajo TX"
+#define WEBUI_LABEL_DUTY       "Porcentaje de slots TX activos (0-100 %)"
+#define WEBUI_HINT_DUTY_INLINE "&nbsp;% (0=nunca, 20=est&#225;ndar WSPR, 100=siempre)"
+#define WEBUI_HINT_DUTY        "20% transmite 1 de cada 5 slots (recomendado WSPR). 100% usa todos los slots disponibles."
 
 // TX control card
-#define WEBUI_CARD_TX_TITLE       "Control TX"
+#define WEBUI_CARD_TX_TITLE "Control TX"
 
 // Status row labels
-#define WEBUI_STATUS_HW_LABEL     "Hardware RF"
-#define WEBUI_STATUS_TIME_LABEL   "Sincronizaci&#243;n horaria"
-#define WEBUI_STATUS_BAND_LABEL   "Banda actual"
-#define WEBUI_STATUS_FREQ_LABEL   "Frecuencia"
-#define WEBUI_STATUS_NEXT_LABEL   "Pr&#243;xima TX"
-#define WEBUI_STATUS_TX_LABEL     "TX activa"
-#define WEBUI_STATUS_SYM_LABEL    "S&#237;mbolo"
+#define WEBUI_STATUS_HW_LABEL   "Hardware RF"
+#define WEBUI_STATUS_TIME_LABEL "Sincronizaci&#243;n horaria"
+#define WEBUI_STATUS_BAND_LABEL "Banda actual"
+#define WEBUI_STATUS_FREQ_LABEL "Frecuencia"
+#define WEBUI_STATUS_NEXT_LABEL "Pr&#243;xima TX"
+#define WEBUI_STATUS_TX_LABEL   "TX activa"
+#define WEBUI_STATUS_SYM_LABEL  "S&#237;mbolo"
 
 // WSPRnet link
 #define WEBUI_WSPR_LINK_TEXT "&#127760; Ver mis spots en WSPRnet &#8599;"
 
-// JS strings — embedded as JavaScript string literals inside the HTML.
-// Unicode escapes here are JavaScript escapes (\\uXXXX in C = \uXXXX in JS).
-#define WEBUI_JS_BTN_TX_START      "Activar TX"
-#define WEBUI_JS_BTN_TX_STOP       "Detener TX"
-#define WEBUI_JS_ERR_LOAD          "Error cargando config: "
-#define WEBUI_JS_SAVED             "Configuraci\\u00f3n guardada"
-#define WEBUI_JS_ERR_TX            "Error TX: "
-#define WEBUI_JS_NOT_SYNCED        "Sin sincronizar"
-#define WEBUI_JS_TRANSMITTING      "Transmitiendo"
-#define WEBUI_JS_SCANNING_TEXT     "Buscando..."
-#define WEBUI_JS_BTN_SCAN_RESTORE  "\\u{1F50C} Buscar redes WiFi..."
-#define WEBUI_JS_NO_NETS           "No se encontraron redes"
-#define WEBUI_JS_HIDDEN            "(oculto)"
-#define WEBUI_JS_ERR_SCAN          "Error en scan WiFi: "
-#define WEBUI_JS_PASS_SAVED        "(contrase\\u00f1a guardada)"
-#define WEBUI_JS_CONFIRM_RESET     "\\u00bfReiniciar el ESP32?"
-#define WEBUI_JS_RESTARTING        "Reiniciando..."
+// JS strings
+#define WEBUI_JS_BTN_TX_START     "Activar TX"
+#define WEBUI_JS_BTN_TX_STOP      "Detener TX"
+#define WEBUI_JS_ERR_LOAD         "Error cargando config: "
+#define WEBUI_JS_SAVED            "Configuraci\\u00f3n guardada"
+#define WEBUI_JS_ERR_TX           "Error TX: "
+#define WEBUI_JS_NOT_SYNCED       "Sin sincronizar"
+#define WEBUI_JS_TRANSMITTING     "Transmitiendo"
+#define WEBUI_JS_SCANNING_TEXT    "Buscando..."
+#define WEBUI_JS_BTN_SCAN_RESTORE "\xf0\x9f\x94\x8c Buscar redes WiFi..."
+#define WEBUI_JS_NO_NETS          "No se encontraron redes"
+#define WEBUI_JS_HIDDEN           "(oculto)"
+#define WEBUI_JS_ERR_SCAN         "Error en scan WiFi: "
+#define WEBUI_JS_PASS_SAVED       "(contrase\\u00f1a guardada)"
+#define WEBUI_JS_CONFIRM_RESET    "\\u00bfReiniciar el ESP32?"
+#define WEBUI_JS_RESTARTING       "Reiniciando..."

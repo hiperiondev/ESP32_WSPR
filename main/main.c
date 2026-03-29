@@ -95,7 +95,8 @@ static void select_next_band(bool force_next) {
         g_hop_ptr = (g_hop_ptr + 1) % g_hop_active_count;
     }
     g_band_idx = g_hop_active_bands[g_hop_ptr];
-    ESP_LOGI(TAG, "Selected band: %s (%lu Hz)", BAND_NAME[g_band_idx], (unsigned long)BAND_FREQ_HZ[g_band_idx]);
+    ESP_LOGI(TAG, "Selected band: %s (%lu Hz)", BAND_NAME[g_band_idx],
+             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx));
 }
 
 static void wspr_transmit(void) {
@@ -111,7 +112,8 @@ static void wspr_transmit(void) {
     // the relay never routes a stale previous-band signal through the new
     // filter passband.  vTaskDelay(10 ms) after gpio_filter_select() lets
     // relay contacts settle before the oscillator output is enabled.
-    uint32_t base_hz = BAND_FREQ_HZ[g_band_idx] + 1500u;
+    // MODIFIED: use config_band_freq_hz() with iaru_region from g_cfg
+    uint32_t base_hz = config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx) + 1500u;
     oscillator_set_freq(base_hz);
     gpio_filter_select(BAND_FILTER[g_band_idx]);
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -131,7 +133,9 @@ static void wspr_transmit(void) {
     //   - Replaces: const int64_t SYMBOL_US = 682667LL and int64_t arithmetic.
     uint32_t tx_start_us = (uint32_t)esp_timer_get_time();
 
-    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz", BAND_NAME[g_band_idx], (unsigned long)BAND_FREQ_HZ[g_band_idx]);
+    // MODIFIED: use config_band_freq_hz() instead of BAND_FREQ_HZ[g_band_idx]
+    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz", BAND_NAME[g_band_idx],
+             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx));
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;
@@ -189,8 +193,7 @@ static void status_task(void *arg) {
         const char *band_name = (g_band_idx >= 0) ? BAND_NAME[g_band_idx] : "---";
 
         if (g_band_idx >= 0) {
-            // Integer-only: no soft-float, 100 Hz display resolution
-            uint32_t freq_hz = BAND_FREQ_HZ[g_band_idx] + 1500u;
+            uint32_t freq_hz = config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx) + 1500u;
             uint32_t mhz_int = freq_hz / 1000000u;
             uint32_t khz_frac = (freq_hz % 1000000u) / 100u;
             snprintf(freq_str, sizeof(freq_str), "%u.%04u MHz", (unsigned)mhz_int, (unsigned)khz_frac);
@@ -212,15 +215,29 @@ static void status_task(void *arg) {
 
 static void scheduler_task(void *arg) {
     ESP_LOGI(TAG, "Scheduler started — waiting for time sync");
-    time_sync_wait(0); // wait forever
-    ESP_LOGI(TAG, "Time synced — entering TX schedule loop");
 
     select_next_band(false);
 
     uint32_t last_hop_ts = 0;
     uint16_t s_duty_accum = 0u;
+    // Track whether we have already logged the "time synced" banner so it
+    // only appears once rather than on every loop iteration after sync.
+    bool time_synced_logged = false;
 
     while (1) {
+        // Non-blocking time sync check: yield for 1 s and retry instead of
+        // blocking forever with time_sync_wait(0).  This keeps the scheduler
+        // task alive so the web UI, status task and config changes remain
+        // responsive even when NTP is unavailable (AP-only mode, no internet).
+        if (!time_sync_is_ready()) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (!time_synced_logged) {
+            ESP_LOGI(TAG, "Time synced — entering TX schedule loop");
+            time_synced_logged = true;
+        }
+
         web_server_cfg_lock();
         bool tx_enabled_snap = g_cfg.tx_enabled;
         web_server_cfg_unlock();

@@ -31,8 +31,8 @@
 #include "esp_system.h"
 #include "freertos/semphr.h"
 #include "web_server.h"
-#include "wifi_manager.h"
 #include "webui_strings.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "web";
 static httpd_handle_t _srv = NULL;
@@ -58,10 +58,10 @@ static const char INDEX_HTML[] =
     ".card h2{color:var(--accent);font-size:1em;margin-bottom:14px;display:flex;align-items:center;gap:8px}"
     "label{display:block;color:var(--sub);font-size:.8em;margin-bottom:4px;margin-top:12px}"
     "label:first-child{margin-top:0}"
-    "input[type=text],input[type=number],input[type=password]{"
+    "input[type=text],input[type=number],input[type=password],select{"
     "width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);"
     "padding:8px 10px;border-radius:6px;font-size:.9em;outline:none;transition:.2s}"
-    "input:focus{border-color:var(--accent)}"
+    "input:focus,select:focus{border-color:var(--accent)}"
     ".bands{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:4px}"
     ".band-cb{display:flex;align-items:center;gap:6px;background:var(--bg);"
     "border:1px solid var(--border);border-radius:6px;padding:6px 8px;cursor:pointer;"
@@ -137,8 +137,7 @@ static const char INDEX_HTML[] =
     "<input id='power' type='number' min='0' max='60' step='3'>"
     "<label>" WEBUI_LABEL_XTAL_CAL "</label>"
     "<input id='xtal_cal' type='number' min='-100000' max='100000' step='100'>"
-    "<p style='color:var(--sub);font-size:.78em;margin-top:4px'>"
-    WEBUI_HINT_XTAL_CAL "</p>"
+    "<p style='color:var(--sub);font-size:.78em;margin-top:4px'>" WEBUI_HINT_XTAL_CAL "</p>"
     "<button class='btn-save' onclick='save()'>" WEBUI_BTN_SAVE "</button>"
     "</div>"
 
@@ -165,6 +164,17 @@ static const char INDEX_HTML[] =
     "</div>"
 
     "<div class='card'>"
+    "<h2>&#127758; " WEBUI_CARD_IARU_TITLE "</h2>"
+    "<label>" WEBUI_LABEL_IARU_REGION "</label>"
+    "<select id='iaru_region'>"
+    "<option value='1'>" WEBUI_IARU_REGION_1 "</option>"
+    "<option value='2'>" WEBUI_IARU_REGION_2 "</option>"
+    "<option value='3'>" WEBUI_IARU_REGION_3 "</option>"
+    "</select>"
+    "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>" WEBUI_HINT_IARU "</p>"
+    "</div>"
+
+    "<div class='card'>"
     "<h2>&#128260; " WEBUI_CARD_HOP_TITLE "</h2>"
     "<div class='toggle'>"
     "<label class='switch'><input type='checkbox' id='hop_en'><span class='slider'></span></label>"
@@ -173,8 +183,7 @@ static const char INDEX_HTML[] =
     "<label style='margin:0;white-space:nowrap'>" WEBUI_LABEL_HOP_INTERVAL "</label>"
     "<input id='hop_interval' type='number' min='120' max='86400' step='120' style='width:100px'>"
     "</div>"
-    "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>"
-    WEBUI_HINT_HOP "</p>"
+    "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>" WEBUI_HINT_HOP "</p>"
     "</div>"
 
     "<div class='card'>"
@@ -184,8 +193,7 @@ static const char INDEX_HTML[] =
     "<input id='tx_duty_pct' type='number' min='0' max='100' step='5' style='width:80px'>"
     "<span style='color:var(--sub);font-size:.85em'>" WEBUI_HINT_DUTY_INLINE "</span>"
     "</div>"
-    "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>"
-    WEBUI_HINT_DUTY "</p>"
+    "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>" WEBUI_HINT_DUTY "</p>"
     "</div>"
 
     "<div class='card'>"
@@ -204,8 +212,7 @@ static const char INDEX_HTML[] =
     "</div>"
     "<div style='margin-top:12px;text-align:center'>"
     "<a id='wspr_link' href='https://wsprnet.org' target='_blank' rel='noopener'"
-    " style='color:var(--accent);font-size:.85em;text-decoration:none'>"
-    WEBUI_WSPR_LINK_TEXT "</a></div>"
+    " style='color:var(--accent);font-size:.85em;text-decoration:none'>" WEBUI_WSPR_LINK_TEXT "</a></div>"
     "</div>"
 
     "</div>"
@@ -244,6 +251,8 @@ static const char INDEX_HTML[] =
     "document.getElementById('hop_en').checked=!!cfg.hop_enabled;"
     "document.getElementById('hop_interval').value=cfg.hop_interval_sec||120;"
     "document.getElementById('tx_duty_pct').value=cfg.tx_duty_pct!=null?cfg.tx_duty_pct:20;"
+    // ADDED: populate IARU region selector; default to 1 if field absent.
+    "document.getElementById('iaru_region').value=cfg.iaru_region||1;"
     "buildBands(cfg.band_enabled||Array(12).fill(false));"
     "updateTxBtn(cfg.tx_enabled);"
     "const cs=(cfg.callsign||'').trim();"
@@ -265,6 +274,7 @@ static const char INDEX_HTML[] =
     "hop_enabled:document.getElementById('hop_en').checked,"
     "hop_interval_sec:parseInt(document.getElementById('hop_interval').value)||120,"
     "tx_duty_pct:parseInt(document.getElementById('tx_duty_pct').value)||20,"
+    "iaru_region:parseInt(document.getElementById('iaru_region').value)||1,"
     "band_enabled:bands"
     "};"
 
@@ -327,8 +337,7 @@ static const char INDEX_HTML[] =
     "if(!r.ok){throw new Error('HTTP '+r.status);}"
     "const aps=await r.json();"
     "if(!aps||aps.length===0){"
-    "lst.innerHTML=\"<div style='padding:10px;color:var(--sub);font-size:.84em;text-align:center'>"
-    WEBUI_JS_NO_NETS "</div>\";"
+    "lst.innerHTML=\"<div style='padding:10px;color:var(--sub);font-size:.84em;text-align:center'>" WEBUI_JS_NO_NETS "</div>\";"
     "lst.style.display='block';"
     "}else{"
     "aps.sort((a,b)=>b.rssi-a.rssi);"
@@ -405,23 +414,22 @@ static wspr_status_t _status = { 0 };
 void web_server_update_status(bool time_ok, const char *time_str, const char *band, const char *freq_str, int32_t next_tx_sec, bool tx_active, bool tx_enabled,
                               int symbol_idx) {
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        // Write ALL fields under the mutex — scalar and string alike
-        _status.time_ok     = time_ok;
-        _status.tx_active   = tx_active;
-        _status.tx_enabled  = tx_enabled;
+        _status.time_ok = time_ok;
+        _status.tx_active = tx_active;
+        _status.tx_enabled = tx_enabled;
         _status.next_tx_sec = next_tx_sec;
-        _status.symbol_idx  = symbol_idx;
+        _status.symbol_idx = symbol_idx;
         if (time_str) {
             strncpy(_status.time_str, time_str, sizeof(_status.time_str) - 1);
-            _status.time_str[sizeof(_status.time_str) - 1] = '\0'; // FIX 2: explicit NUL
+            _status.time_str[sizeof(_status.time_str) - 1] = '\0';
         }
         if (band) {
             strncpy(_status.band, band, sizeof(_status.band) - 1);
-            _status.band[sizeof(_status.band) - 1] = '\0'; // FIX 2: explicit NUL
+            _status.band[sizeof(_status.band) - 1] = '\0';
         }
         if (freq_str) {
             strncpy(_status.freq_str, freq_str, sizeof(_status.freq_str) - 1);
-            _status.freq_str[sizeof(_status.freq_str) - 1] = '\0'; // FIX 2: explicit NUL
+            _status.freq_str[sizeof(_status.freq_str) - 1] = '\0';
         }
         xSemaphoreGive(_status_mutex);
     }
@@ -436,8 +444,6 @@ void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
         }
         xSemaphoreGive(_status_mutex);
     } else {
-        // Mutex not yet created (called before web_server_start) or timed out:
-        // write directly — safe here because tasks have not started yet.
         _status.hw_ok = hw_ok;
         if (hw_name) {
             strncpy(_status.hw_name, hw_name, sizeof(_status.hw_name) - 1);
@@ -507,6 +513,8 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     cJSON_AddBoolToObject(j, "tx_enabled", _cfg->tx_enabled);
     cJSON_AddNumberToObject(j, "tx_duty_pct", _cfg->tx_duty_pct);
     cJSON_AddNumberToObject(j, "xtal_cal_ppb", (double)_cfg->xtal_cal_ppb);
+    // ADDED: send iaru_region so the web UI can pre-select the correct option.
+    cJSON_AddNumberToObject(j, "iaru_region", (double)_cfg->iaru_region);
 
     cJSON *bands = cJSON_CreateArray();
     for (int i = 0; i < BAND_COUNT; i++)
@@ -623,6 +631,12 @@ static esp_err_t h_post_config(httpd_req_t *req) {
             ppb = 100000;
         _cfg->xtal_cal_ppb = ppb;
     }
+    if ((v = cJSON_GetObjectItem(j, "iaru_region")) && cJSON_IsNumber(v)) {
+        int region = v->valueint;
+        if (region < 1 || region > 3)
+            region = 1; // clamp to Region 1 on bad input
+        _cfg->iaru_region = (uint8_t)region;
+    }
 
     cJSON *bands = cJSON_GetObjectItem(j, "band_enabled");
     if (cJSON_IsArray(bands)) {
@@ -669,10 +683,9 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
 }
 
 static esp_err_t h_status(httpd_req_t *req) {
-    // Take a complete snapshot of the status struct under the mutex
     wspr_status_t snap = { 0 };
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        snap = _status; // full struct copy under the lock
+        snap = _status;
         xSemaphoreGive(_status_mutex);
     }
 

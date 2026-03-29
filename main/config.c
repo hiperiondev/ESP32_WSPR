@@ -29,22 +29,63 @@
 static const char *TAG = "config";
 #define NVS_NS "wspr"
 
-const uint32_t BAND_FREQ_HZ[BAND_COUNT] = {
-    137600UL,   // 2200m
-    475700UL,   // 630m
-    1838100UL,  // 160m
-    3570100UL,  // 80m
-    5288600UL,  // 60m
-    7040100UL,  // 40m
-    10140200UL, // 30m
-    14097100UL, // 20m
-    18106100UL, // 17m
-    21096100UL, // 15m
-    24926100UL, // 12m
-    28126100UL, // 10m
+// 60 m dial frequencies by region (source: IARU band plans + WSPRnet):
+//   Region 1 (EU/Africa)  : 5 288 600 Hz  (IARU R1 60 m WSPR allocation)
+//   Region 2 (Americas)   : 5 346 500 Hz  (FCC channels centre, ARRL coord.)
+//   Region 3 (Asia/Pacific): 5 367 000 Hz  (WIA/JARL coordination)
+//
+// Row 0 = IARU Region 1, Row 1 = Region 2, Row 2 = Region 3.
+const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
+    // -- Region 1: Europe, Africa, Middle East --
+    {
+        137600UL,   // 2200m
+        475700UL,   // 630m
+        1838100UL,  // 160m
+        3570100UL,  // 80m
+        5288600UL,  // 60m  <-- Region 1 specific
+        7040100UL,  // 40m
+        10140200UL, // 30m
+        14097100UL, // 20m
+        18106100UL, // 17m
+        21096100UL, // 15m
+        24926100UL, // 12m
+        28126100UL, // 10m
+    },
+    // -- Region 2: Americas (North, Central, South, Caribbean) --
+    {
+        137600UL,   // 2200m
+        475700UL,   // 630m
+        1838100UL,  // 160m
+        3570100UL,  // 80m
+        5346500UL,  // 60m  <-- Region 2 specific (FCC / ARRL coordination)
+        7040100UL,  // 40m
+        10140200UL, // 30m
+        14097100UL, // 20m
+        18106100UL, // 17m
+        21096100UL, // 15m
+        24926100UL, // 12m
+        28126100UL, // 10m
+    },
+    // -- Region 3: Asia, Pacific, Oceania --
+    {
+        137600UL,   // 2200m
+        475700UL,   // 630m
+        1838100UL,  // 160m
+        3570100UL,  // 80m
+        5367000UL,  // 60m  <-- Region 3 specific (WIA/JARL coordination)
+        7040100UL,  // 40m
+        10140200UL, // 30m
+        14097100UL, // 20m
+        18106100UL, // 17m
+        21096100UL, // 15m
+        24926100UL, // 12m
+        28126100UL, // 10m
+    },
 };
 
-const char *BAND_NAME[BAND_COUNT] = { "2200m", "630m", "160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m" };
+const char *BAND_NAME[BAND_COUNT] = {
+    "2200m", "630m", "160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m",
+};
 
 const uint8_t BAND_FILTER[BAND_COUNT] = {
     0, // 2200m -> filter 0
@@ -78,6 +119,7 @@ void config_defaults(wspr_config_t *cfg) {
     cfg->band_enabled[BAND_20M] = true;
     cfg->tx_duty_pct = 20;
     cfg->xtal_cal_ppb = 0;
+    cfg->iaru_region = (uint8_t)IARU_REGION_1;
 }
 
 esp_err_t config_init(void) {
@@ -89,7 +131,6 @@ esp_err_t config_init(void) {
     }
     return err;
 }
-
 
 esp_err_t config_load(wspr_config_t *cfg) {
     config_defaults(cfg);
@@ -129,14 +170,18 @@ esp_err_t config_load(wspr_config_t *cfg) {
         return ESP_OK;
     }
 
-    // Force-terminate all string fields after loading the blob from NVS.
     cfg->callsign[CALLSIGN_LEN - 1] = '\0';
     cfg->locator[LOCATOR_LEN - 1] = '\0';
     cfg->wifi_ssid[sizeof(cfg->wifi_ssid) - 1] = '\0';
     cfg->wifi_pass[sizeof(cfg->wifi_pass) - 1] = '\0';
     cfg->ntp_server[sizeof(cfg->ntp_server) - 1] = '\0';
 
-    ESP_LOGI(TAG, "Config loaded: cs=%s loc=%s pwr=%d dBm cal=%ld ppb", cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb);
+    // ADDED: clamp iaru_region to valid range 1-3; fix any corrupt NVS value.
+    if (cfg->iaru_region < 1 || cfg->iaru_region > 3)
+        cfg->iaru_region = (uint8_t)IARU_REGION_1;
+
+    ESP_LOGI(TAG, "Config loaded: cs=%s loc=%s pwr=%d dBm cal=%ld ppb region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb,
+             (int)cfg->iaru_region);
     return err;
 }
 
@@ -151,6 +196,6 @@ esp_err_t config_save(const wspr_config_t *cfg) {
         err = nvs_commit(h);
     nvs_close(h);
 
-    ESP_LOGI(TAG, "Config saved: cs=%s loc=%s pwr=%d dBm", cfg->callsign, cfg->locator, cfg->power_dbm);
+    ESP_LOGI(TAG, "Config saved: cs=%s loc=%s pwr=%d dBm region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (int)cfg->iaru_region);
     return err;
 }

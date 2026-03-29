@@ -233,6 +233,11 @@ char *wifi_manager_scan(void) {
             }
             return empty;
         }
+        // delay after mode switch to APSTA so the STA
+        // interface PHY has time to initialise before the scan starts.
+        // Without this delay, esp_wifi_scan_start() runs before the STA
+        // radio is ready and consistently returns 0 results.
+        vTaskDelay(pdMS_TO_TICKS(150));
         elevated = true;
     }
 

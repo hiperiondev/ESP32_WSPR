@@ -44,6 +44,14 @@
 // Bands card
 #define WEBUI_CARD_BANDS_TITLE "Active bands"
 
+// IARU region card strings
+#define WEBUI_CARD_IARU_TITLE   "IARU Region &amp; 60 m Frequency"
+#define WEBUI_LABEL_IARU_REGION "IARU Region"
+#define WEBUI_IARU_REGION_1     "Region 1 &mdash; Europe, Africa, Middle East (5.2886 MHz)"
+#define WEBUI_IARU_REGION_2     "Region 2 &mdash; Americas (5.3465 MHz)"
+#define WEBUI_IARU_REGION_3     "Region 3 &mdash; Asia, Pacific (5.3670 MHz)"
+#define WEBUI_HINT_IARU         "Selects the 60 m WSPR dial frequency for your ITU/IARU zone. All other bands use the same frequency worldwide."
+
 // Hop card
 #define WEBUI_CARD_HOP_TITLE     "Frequency hopping"
 #define WEBUI_TOGGLE_HOP_LABEL   "Enable automatic hopping"
@@ -51,40 +59,39 @@
 #define WEBUI_HINT_HOP           "The transmitter rotates through selected bands every N seconds (min. 120 s = 1 TX)."
 
 // Duty cycle card
-#define WEBUI_CARD_DUTY_TITLE    "TX Duty Cycle"
-#define WEBUI_LABEL_DUTY         "Active TX slots percentage (0-100 %)"
-#define WEBUI_HINT_DUTY_INLINE   "&nbsp;% (0=never, 20=WSPR standard, 100=always)"
-#define WEBUI_HINT_DUTY          "20% transmits 1 in 5 slots (WSPR recommended). 100% uses all available slots."
+#define WEBUI_CARD_DUTY_TITLE  "TX Duty Cycle"
+#define WEBUI_LABEL_DUTY       "Active TX slots percentage (0-100 %)"
+#define WEBUI_HINT_DUTY_INLINE "&nbsp;% (0=never, 20=WSPR standard, 100=always)"
+#define WEBUI_HINT_DUTY        "20% transmits 1 in 5 slots (WSPR recommended). 100% uses all available slots."
 
 // TX control card
-#define WEBUI_CARD_TX_TITLE       "TX Control"
+#define WEBUI_CARD_TX_TITLE "TX Control"
 
 // Status row labels
-#define WEBUI_STATUS_HW_LABEL     "RF Hardware"
-#define WEBUI_STATUS_TIME_LABEL   "Time synchronization"
-#define WEBUI_STATUS_BAND_LABEL   "Current band"
-#define WEBUI_STATUS_FREQ_LABEL   "Frequency"
-#define WEBUI_STATUS_NEXT_LABEL   "Next TX"
-#define WEBUI_STATUS_TX_LABEL     "Active TX"
-#define WEBUI_STATUS_SYM_LABEL    "Symbol"
+#define WEBUI_STATUS_HW_LABEL   "RF Hardware"
+#define WEBUI_STATUS_TIME_LABEL "Time synchronization"
+#define WEBUI_STATUS_BAND_LABEL "Current band"
+#define WEBUI_STATUS_FREQ_LABEL "Frequency"
+#define WEBUI_STATUS_NEXT_LABEL "Next TX"
+#define WEBUI_STATUS_TX_LABEL   "Active TX"
+#define WEBUI_STATUS_SYM_LABEL  "Symbol"
 
 // WSPRnet link
 #define WEBUI_WSPR_LINK_TEXT "&#127760; View my spots on WSPRnet &#8599;"
 
-// JS strings — embedded as JavaScript string literals inside the HTML.
-// No unicode escapes needed for English; all characters are plain ASCII.
-#define WEBUI_JS_BTN_TX_START      "Enable TX"
-#define WEBUI_JS_BTN_TX_STOP       "Stop TX"
-#define WEBUI_JS_ERR_LOAD          "Error loading config: "
-#define WEBUI_JS_SAVED             "Configuration saved"
-#define WEBUI_JS_ERR_TX            "TX Error: "
-#define WEBUI_JS_NOT_SYNCED        "Not synchronized"
-#define WEBUI_JS_TRANSMITTING      "Transmitting"
-#define WEBUI_JS_SCANNING_TEXT     "Scanning..."
-#define WEBUI_JS_BTN_SCAN_RESTORE  "\\u{1F50C} Scan WiFi networks..."
-#define WEBUI_JS_NO_NETS           "No networks found"
-#define WEBUI_JS_HIDDEN            "(hidden)"
-#define WEBUI_JS_ERR_SCAN          "WiFi scan error: "
-#define WEBUI_JS_PASS_SAVED        "(saved password)"
-#define WEBUI_JS_CONFIRM_RESET     "Restart ESP32?"
-#define WEBUI_JS_RESTARTING        "Restarting..."
+// JS strings
+#define WEBUI_JS_BTN_TX_START     "Enable TX"
+#define WEBUI_JS_BTN_TX_STOP      "Stop TX"
+#define WEBUI_JS_ERR_LOAD         "Error loading config: "
+#define WEBUI_JS_SAVED            "Configuration saved"
+#define WEBUI_JS_ERR_TX           "TX Error: "
+#define WEBUI_JS_NOT_SYNCED       "Not synchronized"
+#define WEBUI_JS_TRANSMITTING     "Transmitting"
+#define WEBUI_JS_SCANNING_TEXT    "Scanning..."
+#define WEBUI_JS_BTN_SCAN_RESTORE "\xf0\x9f\x94\x8c Scan WiFi networks..."
+#define WEBUI_JS_NO_NETS          "No networks found"
+#define WEBUI_JS_HIDDEN           "(hidden)"
+#define WEBUI_JS_ERR_SCAN         "WiFi scan error: "
+#define WEBUI_JS_PASS_SAVED       "(saved password)"
+#define WEBUI_JS_CONFIRM_RESET    "Restart ESP32?"
+#define WEBUI_JS_RESTARTING       "Restarting..."
