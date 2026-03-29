@@ -1044,7 +1044,7 @@ If you have a suggestion that would make this better, please fork the repo and c
 
 - C99, ESP-IDF coding conventions.
 - All new modules must have a corresponding `module.h` with Doxygen-style API documentation (see `gpio_filter.h`, `oscillator.h` for examples).
-- No floating-point arithmetic in oscillator or encoding code paths.
+- No floating-point nor 64bits arithmetic.
 - New Kconfig options must be documented in this README.
 
 <div align="right">
