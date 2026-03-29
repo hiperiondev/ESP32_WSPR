@@ -690,6 +690,8 @@ static esp_err_t h_post_config(httpd_req_t *req) {
             _cfg->band_enabled[i] = cJSON_IsTrue(cJSON_GetArrayItem(bands, i));
     }
 
+    _cfg->bands_changed = true; // mark for rebuild when band_enabled or hop_enabled changed via web UI
+
     wspr_config_t cfg_snap = *_cfg;
     // snapshot the new calibration value before releasing the
     // lock so we can apply it to the oscillator driver without holding the mutex.

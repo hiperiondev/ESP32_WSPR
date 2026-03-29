@@ -180,6 +180,12 @@ static void gps_task(void *arg) {
                 line[line_pos++] = c;
             }
         }
+        // Explicit short yield after every buffer processing
+        // (even when len==0) to guarantee idle task runs and prevent
+        // any edge-case watchdog triggers on long GPS-silent periods.
+        // uart_read_bytes timeout already yields, but this makes
+        // behaviour deterministic and fully explicit.
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 

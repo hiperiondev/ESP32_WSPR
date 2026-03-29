@@ -126,6 +126,7 @@ void config_defaults(wspr_config_t *cfg) {
     cfg->tx_duty_pct = 20;
     cfg->xtal_cal_ppb = 0;
     cfg->iaru_region = (uint8_t)IARU_REGION_1;
+    cfg->bands_changed = false;
 }
 
 esp_err_t config_init(void) {

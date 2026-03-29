@@ -119,6 +119,7 @@ static void rebuild_active_bands(void) {
     if (g_hop_ptr >= g_hop_active_count)
         g_hop_ptr = 0;
     ESP_LOGI(TAG, "Active bands: %d", g_hop_active_count);
+    g_cfg.bands_changed = false; // clear the flag after rebuild to prevent unnecessary calls in scheduler
 }
 
 static void select_next_band(bool force_next) {
@@ -370,6 +371,8 @@ static void scheduler_task(void *arg) {
             web_server_cfg_lock();
             bool hop_en = g_cfg.hop_enabled;
             uint32_t hop_intv = g_cfg.hop_interval_sec;
+            bool need_rebuild = g_cfg.bands_changed;
+            g_cfg.bands_changed = false; // clear flag under lock so rebuild happens only on actual config change
             web_server_cfg_unlock();
 
             if (hop_intv == 0u)
@@ -377,7 +380,7 @@ static void scheduler_task(void *arg) {
 
             bool do_hop = hop_en && (now - last_hop_ts) >= hop_intv;
 
-            if (do_hop || g_band_idx < 0) {
+            if (do_hop || g_band_idx < 0 || need_rebuild) {
                 select_next_band(do_hop);
                 last_hop_ts = now;
             }

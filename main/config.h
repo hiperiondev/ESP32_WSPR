@@ -105,6 +105,7 @@ typedef struct {
     uint8_t tx_duty_pct;
     int32_t xtal_cal_ppb;
     uint8_t iaru_region;
+    bool bands_changed; // set true by web save when band_enabled or hop_enabled changes; cleared after rebuild
 } wspr_config_t;
 
 // ---------------------------------------------------------------------------
