@@ -17,9 +17,10 @@ menu "WSPR Transmitter"
         default 23
         range 0 60
         help
-            Transmit power in dBm (valid WSPR levels: 0,3,7,10,13,17,20,23,
-            27,30,33,37,40,43,47,50,53,57,60). Values not in the list are
-            rounded to the nearest valid level by the encoder.
+            Transmit power in dBm. WSPR requires values from this set:
+            0, 3, 7, 10, 13, 17, 20, 23, 27, 30, 33, 37, 40, 43, 47, 50, 53, 57, 60.
+            Other values are silently rounded to the nearest valid level by the encoder.
+            23 dBm = 200 mW (typical Si5351 + PA output).
 
     config SI5351_I2C_PORT
         int "I2C port number (0 or 1)"

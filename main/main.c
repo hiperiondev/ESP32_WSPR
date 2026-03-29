@@ -125,8 +125,13 @@ static void select_next_band(bool force_next) {
 static void wspr_transmit(void) {
     uint8_t symbols[WSPR_SYMBOLS];
 
+    // MODIFIED 3.9: expanded error message identifies which field is invalid
+    // and what the required format is, replacing the generic "check callsign/locator".
     if (wspr_encode(g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm, symbols) < 0) {
-        ESP_LOGE(TAG, "WSPR encode failed — check callsign/locator");
+        ESP_LOGE(TAG, "WSPR encode failed: cs='%s' loc='%s' -- "
+                 "callsign must be <=6 chars with digit at pos 2 or 3; "
+                 "locator must be exactly 4 chars (AA00 format)",
+                 g_cfg.callsign, g_cfg.locator);
         return;
     }
 
@@ -246,7 +251,11 @@ static void scheduler_task(void *arg) {
     select_next_band(false);
 
     uint32_t last_hop_ts = 0;
-    uint16_t s_duty_accum = 0u;
+    // MODIFIED 3.11: initialize to 100 so the very first eligible TX slot fires
+    // immediately. With 0 the Bresenham accumulator requires one full duty cycle
+    // of slots to expire before the first TX, which delays the first transmission
+    // and produces unexpected behavior after a duty-cycle config change.
+    uint16_t s_duty_accum = 100u;
     // Track whether we have already logged the "time synced" banner so it
     // only appears once rather than on every loop iteration after sync.
     bool time_synced_logged = false;
@@ -313,7 +322,10 @@ static void scheduler_task(void *arg) {
             // Frequency hopping decision
             struct timeval tv;
             gettimeofday(&tv, NULL);
-            uint32_t now = (uint32_t)tv.tv_sec;
+            // MODIFIED 3.12: explicit mask makes the 64-bit time_t -> uint32_t
+            // truncation visible in source and suppresses compiler warnings on
+            // platforms where time_t is wider than 32 bits.
+            uint32_t now = (uint32_t)(tv.tv_sec & 0xFFFFFFFFUL);
 
             web_server_cfg_lock();
             bool hop_en = g_cfg.hop_enabled;

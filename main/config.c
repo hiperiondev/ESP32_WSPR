@@ -180,6 +180,12 @@ esp_err_t config_load(wspr_config_t *cfg) {
     if (cfg->iaru_region < 1 || cfg->iaru_region > 3)
         cfg->iaru_region = (uint8_t)IARU_REGION_1;
 
+    // MODIFIED 3.12: clamp hop_interval_sec to the minimum of one WSPR TX slot.
+    // A corrupt or legacy NVS value below 120 s would rotate bands on every
+    // scheduler iteration instead of once per slot, breaking normal operation.
+    if (cfg->hop_interval_sec < 120u)
+        cfg->hop_interval_sec = 120u;
+
     ESP_LOGI(TAG, "Config loaded: cs=%s loc=%s pwr=%d dBm cal=%ld ppb region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb,
              (int)cfg->iaru_region);
     return err;
