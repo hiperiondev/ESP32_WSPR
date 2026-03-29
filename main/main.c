@@ -338,22 +338,13 @@ static void scheduler_task(void *arg) {
                 vTaskDelay(pdMS_TO_TICKS(sleep_ms));
             }
 
-            // Fine busy-wait: tolerant window fires when tv_sec%120 is in [1..5].
-            // NOTE 3.13: if this task is blocked in web_server_cfg_lock() by a
-            // concurrent HTTP request for more than 5 s, phase will exceed 5
-            // when it resumes and the slot is missed gracefully — the scheduler
-            // waits for the next even-minute boundary without further action.
             for (;;) {
                 struct timeval tv;
                 gettimeofday(&tv, NULL);
                 uint32_t phase = (uint32_t)(tv.tv_sec % 120u);
                 if (phase >= 1u && phase <= 5u)
                     break;
-                if (phase > 5u) {
-                    ESP_LOGW(TAG, "TX slot missed (phase=%u), waiting for next", (unsigned)phase);
-                    do_skip = true;
-                    break;
-                }
+
                 vTaskDelay(pdMS_TO_TICKS(10));
                 web_server_cfg_lock();
                 bool still_en = g_cfg.tx_enabled;

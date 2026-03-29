@@ -18,7 +18,7 @@
  * Boston, MA 02110-1301, USA.
  *
  */
- 
+
 // MODIFIED 3.14: added ctype.h for isxdigit(), isdigit(), toupper() used in GPS mode
 #include <ctype.h>
 #include <string.h>
@@ -245,7 +245,15 @@ int32_t time_sync_secs_to_next_tx(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     time_t now = tv.tv_sec;
-    // Next TX slot starts 1 second past the next even minute
-    time_t next = (now - (now % 120)) + 120 + 1;
-    return (int32_t)(next - now);
+
+    // Slot window is seconds % 120 in [1..5]. Return seconds until the next slot starts.
+    // p==0 -> slot in 1s; p==1..5 -> already in window (0s); p>=6 -> next cycle.
+    uint32_t p = (uint32_t)(now % 120);
+    if (p < 1) {
+        return 1;
+    } else if (p <= 5) {
+        return 0;
+    } else {
+        return (int32_t)(121 - p);
+    }
 }
