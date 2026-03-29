@@ -23,6 +23,7 @@
 
 #include "driver/gpio.h"
 #include "esp_log.h"
+
 #include "gpio_filter.h"
 
 // Guard the three filter pins against each other: wiring two address

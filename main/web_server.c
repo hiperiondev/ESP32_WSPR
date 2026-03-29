@@ -25,11 +25,12 @@
 #include <string.h>
 
 #include "cJSON.h"
-#include "config.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/semphr.h"
+
+#include "config.h"
 #include "oscillator.h"
 #include "web_server.h"
 #include "webui_strings.h"

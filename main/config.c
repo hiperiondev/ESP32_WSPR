@@ -21,10 +21,11 @@
 
 #include <string.h>
 
-#include "config.h"
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+#include "config.h"
 
 static const char *TAG = "config";
 #define NVS_NS "wspr"

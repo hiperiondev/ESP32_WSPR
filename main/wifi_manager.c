@@ -30,6 +30,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+
 #include "wifi_manager.h"
 
 static const char *TAG = "wifi";

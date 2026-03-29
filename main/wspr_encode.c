@@ -127,7 +127,7 @@ static int pack_callsign(const char *cs, uint32_t *out) {
 // truncating, so the caller can warn the user.
 static int pack_locator(const char *loc, uint32_t *out) {
     size_t len = strlen(loc);
-    if (len < 4 || len > 6) // Modified: allow up to 6 characters to support Type-3 messages (6-character locators)
+    if (len < 4 || len > 6) // allow up to 6 characters to support Type-3 messages (6-character locators)
         return -1;
 
     // for Type-3 support we accept full 6-char input.

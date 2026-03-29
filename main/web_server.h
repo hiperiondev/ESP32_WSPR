@@ -24,8 +24,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "config.h"
 #include "esp_err.h"
+
+#include "config.h"
 
 /**
  * @file web_server.h
