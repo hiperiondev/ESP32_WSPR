@@ -348,8 +348,6 @@ The IP address is also printed to the ESP32 serial console at boot.
 
 #### Main page overview
 
-![WebUI Main](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/webui_main.jpg)
-
 The main page is divided into several configuration cards, a live status panel, and a TX control button. All changes require saving with the **Save configuration** button before they take effect. Configuration is persisted immediately to NVS flash.
 
 ---
