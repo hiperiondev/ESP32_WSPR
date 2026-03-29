@@ -197,7 +197,7 @@ GPIO_SDA  ──── SDA  (with 4.7 kΩ pull-up to 3.3 V)
 GPIO_SCL  ──── SCL  (with 4.7 kΩ pull-up to 3.3 V)
 3.3 V     ──── VCC
 GND       ──── GND
-           CLK0 ──── LPF input (via matching network)
+CLK0      ──── LPF input (via matching network)
 ```
 
 - I2C address: `0x60` (fixed on most breakout boards)
@@ -210,13 +210,13 @@ GND       ──── GND
 
 ```
 ESP32              AD9850 module
-AD9850_CLK_GPIO  ──── W_CLK
-AD9850_FQ_UD_GPIO──── FQ_UD
-AD9850_DATA_GPIO ──── D7 / DATA (serial mode)
-AD9850_RESET_GPIO──── RESET
-3.3 V / 5 V      ──── VCC  (check module voltage)
-GND              ──── GND
-                  OUT1 ──── LPF input (sine wave output)
+AD9850_CLK_GPIO    ──── W_CLK
+AD9850_FQ_UD_GPIO  ──── FQ_UD
+AD9850_DATA_GPIO   ──── D7 / DATA (serial mode)
+AD9850_RESET_GPIO  ──── RESET
+3.3 V / 5 V        ──── VCC  (check module voltage)
+GND                ──── GND
+OUT1               ──── LPF input (sine wave output)
 ```
 
 - Reference clock: 125 MHz (most common AD9850 modules)
