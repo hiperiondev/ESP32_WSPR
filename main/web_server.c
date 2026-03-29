@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
+ * Copyright 2026 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
  * * Project Site: https://github.com/hiperiondev/ESP32_WSPR *
  *
  * This is free software; you can redistribute it and/or modify
@@ -32,6 +32,7 @@
 #include "freertos/semphr.h"
 #include "web_server.h"
 #include "wifi_manager.h"
+#include "webui_strings.h"
 
 static const char *TAG = "web";
 static httpd_handle_t _srv = NULL;
@@ -41,7 +42,7 @@ static SemaphoreHandle_t _status_mutex = NULL;
 static SemaphoreHandle_t _cfg_mutex = NULL;
 
 static const char INDEX_HTML[] =
-    "<!DOCTYPE html><html lang='es'><head>"
+    "<!DOCTYPE html><html lang='" WEBUI_HTML_LANG "'><head>"
     "<meta charset='UTF-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
     "<title>WSPR Transmitter</title>"
@@ -127,84 +128,84 @@ static const char INDEX_HTML[] =
     "<div class='grid'>"
 
     "<div class='card'>"
-    "<h2>&#128752; Estaci&#243;n</h2>"
-    "<label>Indicativo</label>"
+    "<h2>&#128752; " WEBUI_CARD_STATION_TITLE "</h2>"
+    "<label>" WEBUI_LABEL_CALLSIGN "</label>"
     "<input id='callsign' type='text' maxlength='11' placeholder='LU1ABC'>"
-    "<label>Localizador Maidenhead (4 car.)</label>"
+    "<label>" WEBUI_LABEL_LOCATOR "</label>"
     "<input id='locator' type='text' maxlength='4' placeholder='GF05'>"
-    "<label>Potencia TX (dBm)</label>"
+    "<label>" WEBUI_LABEL_POWER "</label>"
     "<input id='power' type='number' min='0' max='60' step='3'>"
-    "<label>Calibraci&#243;n XTAL (ppb)</label>"
+    "<label>" WEBUI_LABEL_XTAL_CAL "</label>"
     "<input id='xtal_cal' type='number' min='-100000' max='100000' step='100'>"
     "<p style='color:var(--sub);font-size:.78em;margin-top:4px'>"
-    "Compensaci&#243;n del cristal en ppb. 0&#61;sin correcci&#243;n. Efectivo al reiniciar.</p>"
-    "<button class='btn-save' onclick='save()'>&#128190; Guardar configuraci&#243;n</button>"
+    WEBUI_HINT_XTAL_CAL "</p>"
+    "<button class='btn-save' onclick='save()'>" WEBUI_BTN_SAVE "</button>"
     "</div>"
 
     "<div class='card'>"
-    "<h2>&#128246; Red WiFi (modo STA)</h2>"
+    "<h2>&#128246; " WEBUI_CARD_WIFI_TITLE "</h2>"
     "<label>SSID</label>"
     "<input id='wifi_ssid' type='text' maxlength='32' placeholder='Mi_Red'>"
-    "<button class='btn-scan' id='scan_btn' onclick='scanWifi()'>&#128268; Buscar redes WiFi...</button>"
+    "<button class='btn-scan' id='scan_btn' onclick='scanWifi()'>" WEBUI_BTN_SCAN_LABEL "</button>"
     "<div class='scan-list' id='scan_list'></div>"
-    "<label>Contrase&#241;a</label>"
+    "<label>" WEBUI_LABEL_PASSWORD "</label>"
     "<input id='wifi_pass' type='password' maxlength='64' placeholder='&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;&#8226;' oninput='_passEdited=true'>"
     "<div class='pass-toggle' onclick='togglePassVis()'>"
     "<input type='checkbox' id='show_pass' onclick='event.stopPropagation();togglePassVis()'>"
-    "<span>Mostrar contrase&#241;a</span>"
+    "<span>" WEBUI_SHOW_PASS_TEXT "</span>"
     "</div>"
-    "<label>Servidor NTP</label>"
+    "<label>" WEBUI_LABEL_NTP "</label>"
     "<input id='ntp_server' type='text' maxlength='63' placeholder='pool.ntp.org'>"
-    "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>Sin credenciales &#8594; modo AP (192.168.4.1)</p>"
+    "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>" WEBUI_HINT_NO_CRED "</p>"
     "</div>"
 
     "<div class='card'>"
-    "<h2>&#128251; Bandas activas</h2>"
+    "<h2>&#128251; " WEBUI_CARD_BANDS_TITLE "</h2>"
     "<div class='bands' id='bands'></div>"
     "</div>"
 
     "<div class='card'>"
-    "<h2>&#128260; Salto de frecuencia</h2>"
+    "<h2>&#128260; " WEBUI_CARD_HOP_TITLE "</h2>"
     "<div class='toggle'>"
     "<label class='switch'><input type='checkbox' id='hop_en'><span class='slider'></span></label>"
-    "<span>Habilitar salto autom&#225;tico</span></div>"
+    "<span>" WEBUI_TOGGLE_HOP_LABEL "</span></div>"
     "<div class='hop-row'>"
-    "<label style='margin:0;white-space:nowrap'>Intervalo (s):</label>"
+    "<label style='margin:0;white-space:nowrap'>" WEBUI_LABEL_HOP_INTERVAL "</label>"
     "<input id='hop_interval' type='number' min='120' max='86400' step='120' style='width:100px'>"
     "</div>"
     "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>"
-    "El transmisor rotar&#225; por las bandas seleccionadas cada N segundos (m&#237;n. 120 s = 1 TX).</p>"
+    WEBUI_HINT_HOP "</p>"
     "</div>"
 
     "<div class='card'>"
-    "<h2>&#128202; Ciclo de trabajo TX</h2>"
-    "<label>Porcentaje de slots TX activos (0-100 %)</label>"
+    "<h2>&#128202; " WEBUI_CARD_DUTY_TITLE "</h2>"
+    "<label>" WEBUI_LABEL_DUTY "</label>"
     "<div class='row'>"
     "<input id='tx_duty_pct' type='number' min='0' max='100' step='5' style='width:80px'>"
-    "<span style='color:var(--sub);font-size:.85em'>&nbsp;% (0=nunca, 20=est&#225;ndar WSPR, 100=siempre)</span>"
+    "<span style='color:var(--sub);font-size:.85em'>" WEBUI_HINT_DUTY_INLINE "</span>"
     "</div>"
     "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>"
-    "20% transmite 1 de cada 5 slots (recomendado WSPR). 100% usa todos los slots disponibles.</p>"
+    WEBUI_HINT_DUTY "</p>"
     "</div>"
 
     "<div class='card'>"
-    "<h2>&#9889; Control TX</h2>"
+    "<h2>&#9889; " WEBUI_CARD_TX_TITLE "</h2>"
     "<div class='toggle'>"
-    "<button class='btn-tx off' id='tx_btn' onclick='toggleTx()'>Activar TX</button>"
+    "<button class='btn-tx off' id='tx_btn' onclick='toggleTx()'>" WEBUI_JS_BTN_TX_START "</button>"
     "</div>"
     "<div class='status-box'>"
-    "<div class='status-row'><span>Hardware RF</span><span id='s_hw'><span class='badge warn'>---</span></span></div>"
-    "<div class='status-row'><span>Sincronizaci&#243;n horaria</span><span id='s_time'><span class='badge warn'>---</span></span></div>"
-    "<div class='status-row'><span>Banda actual</span><span id='s_band'>---</span></div>"
-    "<div class='status-row'><span>Frecuencia</span><span id='s_freq'>---</span></div>"
-    "<div class='status-row'><span>Pr&#243;xima TX</span><span id='s_next'>---</span></div>"
-    "<div class='status-row'><span>TX activa</span><span id='s_tx'><span class='badge err'>OFF</span></span></div>"
-    "<div class='status-row'><span>S&#237;mbolo</span><span id='s_sym'>---</span></div>"
+    "<div class='status-row'><span>" WEBUI_STATUS_HW_LABEL "</span><span id='s_hw'><span class='badge warn'>---</span></span></div>"
+    "<div class='status-row'><span>" WEBUI_STATUS_TIME_LABEL "</span><span id='s_time'><span class='badge warn'>---</span></span></div>"
+    "<div class='status-row'><span>" WEBUI_STATUS_BAND_LABEL "</span><span id='s_band'>---</span></div>"
+    "<div class='status-row'><span>" WEBUI_STATUS_FREQ_LABEL "</span><span id='s_freq'>---</span></div>"
+    "<div class='status-row'><span>" WEBUI_STATUS_NEXT_LABEL "</span><span id='s_next'>---</span></div>"
+    "<div class='status-row'><span>" WEBUI_STATUS_TX_LABEL "</span><span id='s_tx'><span class='badge err'>OFF</span></span></div>"
+    "<div class='status-row'><span>" WEBUI_STATUS_SYM_LABEL "</span><span id='s_sym'>---</span></div>"
     "</div>"
     "<div style='margin-top:12px;text-align:center'>"
     "<a id='wspr_link' href='https://wsprnet.org' target='_blank' rel='noopener'"
     " style='color:var(--accent);font-size:.85em;text-decoration:none'>"
-    "&#127760; Ver mis spots en WSPRnet &#8599;</a></div>"
+    WEBUI_WSPR_LINK_TEXT "</a></div>"
     "</div>"
 
     "</div>"
@@ -238,7 +239,7 @@ static const char INDEX_HTML[] =
     "_passEdited=false;"
     "document.getElementById('show_pass').checked=false;"
     "document.getElementById('wifi_pass').type='password';"
-    "document.getElementById('wifi_pass').placeholder=_hasPass?'(contrase\\u00f1a guardada)':'\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022';"
+    "document.getElementById('wifi_pass').placeholder=_hasPass?'" WEBUI_JS_PASS_SAVED "':'\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022';"
     "document.getElementById('ntp_server').value=cfg.ntp_server||'pool.ntp.org';"
     "document.getElementById('hop_en').checked=!!cfg.hop_enabled;"
     "document.getElementById('hop_interval').value=cfg.hop_interval_sec||120;"
@@ -250,7 +251,7 @@ static const char INDEX_HTML[] =
     "document.getElementById('wspr_link').href="
     "'https://wsprnet.org/drupal/wsprnet/spots?callsign='+encodeURIComponent(cs);"
     "}"
-    "}catch(e){toast('Error cargando config: '+e,'err');}}"
+    "}catch(e){toast('" WEBUI_JS_ERR_LOAD "'+e,'err');}}"
 
     "async function save(){"
     "const bands=Array.from(document.querySelectorAll('#bands input')).map(i=>i.checked);"
@@ -275,7 +276,7 @@ static const char INDEX_HTML[] =
     "headers:{'Content-Type':'application/json'},"
     "body:JSON.stringify(body)});"
     "const j=await r.json();"
-    "toast(j.ok?'\\u2705 Configuraci\\u00f3n guardada':'\\u274c Error: '+j.err,j.ok?'ok':'err');"
+    "toast(j.ok?'\\u2705 " WEBUI_JS_SAVED "':'\\u274c Error: '+j.err,j.ok?'ok':'err');"
     "if(j.ok){_passEdited=false;loadCfg();}"
     "}catch(e){toast('Error: '+e,'err');}}"
 
@@ -284,11 +285,11 @@ static const char INDEX_HTML[] =
     "const r=await fetch('/api/tx_toggle',{method:'POST'});"
     "const j=await r.json();"
     "updateTxBtn(j.tx_enabled);"
-    "}catch(e){toast('Error TX: '+e,'err');}}"
+    "}catch(e){toast('" WEBUI_JS_ERR_TX "'+e,'err');}}"
 
     "function updateTxBtn(on){"
     "const b=document.getElementById('tx_btn');"
-    "b.textContent=on?'Detener TX':'Activar TX';"
+    "b.textContent=on?'" WEBUI_JS_BTN_TX_STOP "':'" WEBUI_JS_BTN_TX_START "';"
     "b.className='btn-tx '+(on?'on':'off');}"
 
     "async function pollStatus(){"
@@ -299,10 +300,10 @@ static const char INDEX_HTML[] =
     "`<span class='badge err'>${s.hw_name} \\u26a0</span>`;"
     "document.getElementById('s_time').innerHTML=s.time_ok?"
     "`<span class='badge ok'>${s.time_str}</span>`:"
-    "`<span class='badge warn'>Sin sincronizar</span>`;"
+    "`<span class='badge warn'>" WEBUI_JS_NOT_SYNCED "</span>`;"
     "document.getElementById('s_band').textContent=s.band||'---';"
     "document.getElementById('s_freq').textContent=s.freq_str||'---';"
-    "document.getElementById('s_next').textContent=s.next_tx_sec>0?s.next_tx_sec+'s':'Transmitiendo';"
+    "document.getElementById('s_next').textContent=s.next_tx_sec>0?s.next_tx_sec+'s':'" WEBUI_JS_TRANSMITTING "';"
     "document.getElementById('s_tx').innerHTML=s.tx_active?"
     "`<span class='badge ok'>ON</span>`:`<span class='badge err'>OFF</span>`;"
     "document.getElementById('s_sym').textContent=s.tx_active?(s.symbol_idx+'/162'):'---';"
@@ -318,7 +319,7 @@ static const char INDEX_HTML[] =
     "const btn=document.getElementById('scan_btn');"
     "const lst=document.getElementById('scan_list');"
     "btn.disabled=true;"
-    "btn.textContent='\\u23f3 Buscando...';"
+    "btn.textContent='\\u23f3 " WEBUI_JS_SCANNING_TEXT "';"
     "lst.style.display='none';"
     "lst.innerHTML='';"
     "try{"
@@ -326,7 +327,8 @@ static const char INDEX_HTML[] =
     "if(!r.ok){throw new Error('HTTP '+r.status);}"
     "const aps=await r.json();"
     "if(!aps||aps.length===0){"
-    "lst.innerHTML=\"<div style='padding:10px;color:var(--sub);font-size:.84em;text-align:center'>No se encontraron redes</div>\";"
+    "lst.innerHTML=\"<div style='padding:10px;color:var(--sub);font-size:.84em;text-align:center'>"
+    WEBUI_JS_NO_NETS "</div>\";"
     "lst.style.display='block';"
     "}else{"
     "aps.sort((a,b)=>b.rssi-a.rssi);"
@@ -335,7 +337,7 @@ static const char INDEX_HTML[] =
     "row.className='scan-item';"
     "const rssiColor=ap.rssi>=-60?'var(--green)':ap.rssi>=-75?'#e3b341':'var(--red)';"
     "const lock=ap.auth?'&#128274;':'';"
-    "row.innerHTML=`<span class='scan-ssid'>${ap.ssid||'(oculto)'}</span>`"
+    "row.innerHTML=`<span class='scan-ssid'>${ap.ssid||'" WEBUI_JS_HIDDEN "'}</span>`"
     "+`<span class='scan-rssi' style='color:${rssiColor}'>${ap.rssi} dBm</span>`"
     "+`<span class='scan-lock'>${lock}</span>`;"
     "row.onclick=()=>{"
@@ -348,10 +350,10 @@ static const char INDEX_HTML[] =
     "lst.style.display='block';"
     "}"
     "}catch(e){"
-    "toast('Error en scan WiFi: '+e,'err');"
+    "toast('" WEBUI_JS_ERR_SCAN "'+e,'err');"
     "}finally{"
     "btn.disabled=false;"
-    "btn.textContent='\\u{1F50C} Buscar redes WiFi...';"
+    "btn.textContent='" WEBUI_JS_BTN_SCAN_RESTORE "';"
     "}}"
 
     "function togglePassVis(){"
@@ -360,7 +362,7 @@ static const char INDEX_HTML[] =
     "if(cb.checked){"
     "if(!_passEdited&&_hasPass){"
     "inp.type='text';"
-    "inp.value='(contrase\\u00f1a guardada)';"
+    "inp.value='" WEBUI_JS_PASS_SAVED "';"
     "inp.style.color='var(--sub)';"
     "}else{"
     "inp.type='text';"
@@ -372,14 +374,14 @@ static const char INDEX_HTML[] =
     "}"
     "inp.style.color='';"
     "inp.type='password';"
-    "inp.placeholder=_hasPass&&!_passEdited?'(contrase\\u00f1a guardada)':'\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022';"
+    "inp.placeholder=_hasPass&&!_passEdited?'" WEBUI_JS_PASS_SAVED "':'\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022\\u2022';"
     "}"
     "}"
 
     "async function resetESP(){"
-    "if(!confirm('\\u00bfReiniciar el ESP32?'))return;"
+    "if(!confirm('" WEBUI_JS_CONFIRM_RESET "'))return;"
     "try{await fetch('/api/reset',{method:'POST'});}catch(e){}"
-    "toast('Reiniciando...','warn');"
+    "toast('" WEBUI_JS_RESTARTING "','warn');"
     "setTimeout(()=>location.reload(),4000);}"
 
     "loadCfg();setInterval(pollStatus,2000);"
@@ -400,14 +402,6 @@ typedef struct {
 
 static wspr_status_t _status = { 0 };
 
-// MODIFIED: web_server_update_status() — FIX 1 + FIX 2
-// Previously, scalar fields (time_ok, tx_active, tx_enabled, next_tx_sec,
-// symbol_idx) were written OUTSIDE the mutex while h_status() could be
-// reading them from the HTTP task on the second core, causing a data race.
-// Now the entire snapshot is assembled locally and written to _status under
-// _status_mutex in a single critical section.
-// FIX 2: explicit NUL-termination added after each strncpy (strncpy does not
-// guarantee a NUL terminator when source length >= destination size).
 void web_server_update_status(bool time_ok, const char *time_str, const char *band, const char *freq_str, int32_t next_tx_sec, bool tx_active, bool tx_enabled,
                               int symbol_idx) {
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -433,10 +427,6 @@ void web_server_update_status(bool time_ok, const char *time_str, const char *ba
     }
 }
 
-// MODIFIED: web_server_set_hw_status() — FIX 4
-// hw_ok and hw_name are now written under _status_mutex to be consistent
-// with how h_status() reads them (inside the mutex snapshot).
-// Previously hw_ok was written without any mutex protection.
 void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         _status.hw_ok = hw_ok;
@@ -678,12 +668,6 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// MODIFIED: h_status() — FIX 3
-// Previously, scalar fields (hw_ok, time_ok, tx_active, tx_enabled,
-// next_tx_sec, symbol_idx) were read OUTSIDE the _status_mutex, racing with
-// web_server_update_status() running on the other core.
-// Now a full local snapshot of _status is taken under the mutex, and all
-// cJSON calls use the snapshot values.
 static esp_err_t h_status(httpd_req_t *req) {
     // Take a complete snapshot of the status struct under the mutex
     wspr_status_t snap = { 0 };

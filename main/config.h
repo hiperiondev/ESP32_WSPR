@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
+ * Copyright 2026 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
  * * Project Site: https://github.com/hiperiondev/ESP32_WSPR *
  *
  * This is free software; you can redistribute it and/or modify
@@ -142,7 +142,6 @@ typedef enum {
  * @brief Compile-time guard: catches future enum additions that forget to
  *        update the band frequency / name / filter tables.
  */
-// MODIFIED: moved static_assert to after enum definition for clarity
 static_assert(BAND_COUNT == 12, "BAND_COUNT changed; update all band tables");
 
 /**

@@ -175,4 +175,22 @@ menu "WSPR Transmitter"
             WPA2 password for the fallback SoftAP. Leave empty for an open
             network (no authentication required).
 
+    choice WEBUI_LANGUAGE
+        prompt "Web UI language"
+        default WEBUI_LANG_EN
+        help
+            Display language for the web configuration interface.
+            The selected language file (webui_XX.h) is included at compile time
+            via webui_strings.h — no runtime overhead or extra flash storage.
+            To add a new language, create webui_XX.h with all WEBUI_* macros
+            defined, add a config entry here, and add the #elif in webui_strings.h.
+
+        config WEBUI_LANG_EN
+            bool "English"
+
+        config WEBUI_LANG_ES
+            bool "Spanish (Espanol)"
+
+    endchoice
+
 endmenu

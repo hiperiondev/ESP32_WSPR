@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
+ * Copyright 2026 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
  * * Project Site: https://github.com/hiperiondev/ESP32_WSPR *
  *
  * This is free software; you can redistribute it and/or modify
@@ -226,19 +226,8 @@ static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
 
 #define AD9850_SCALE_KHZ ((uint32_t)(4294967296ULL / ((uint32_t)AD9850_REF_CLK / 1000UL)))
 
-// MODIFIED: ad9850_freq_word() — FIX: undefined behaviour when _ad_cal == INT32_MIN.
-// The original code computed (uint32_t)(-_ad_cal) which invokes signed integer
-// overflow (UB in C) when _ad_cal is INT32_MIN (-2147483648) because the
-// mathematical result +2147483648 is not representable in int32_t.
-// Fix: compute ppb_abs using a conditional cast that stays in uint32_t
-// arithmetic throughout, avoiding the signed negation entirely.
-// When _ad_cal < 0 we cast _ad_cal to uint32_t first (two's-complement
-// wrap-around gives the correct absolute value bit pattern) then negate using
-// unsigned arithmetic: ppb_abs = (uint32_t)(-(uint32_t)_ad_cal) is well-defined
-// for any negative int32_t including INT32_MIN.
 static uint32_t ad9850_freq_word(uint32_t freq_hz) {
     if (_ad_cal != 0) {
-        // MODIFIED: safe absolute value — avoids UB on INT32_MIN
         uint32_t ppb_abs;
         if (_ad_cal > 0) {
             ppb_abs = (uint32_t)_ad_cal;

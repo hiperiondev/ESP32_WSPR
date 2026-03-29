@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
+ * Copyright 2026 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
  * * Project Site: https://github.com/hiperiondev/ESP32_WSPR *
  *
  * This is free software; you can redistribute it and/or modify

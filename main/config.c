@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
+ * Copyright 2026 Emiliano Augusto Gonzalez (egonzalez . hiperion @ gmail . com))
  * * Project Site: https://github.com/hiperiondev/ESP32_WSPR *
  *
  * This is free software; you can redistribute it and/or modify
@@ -90,14 +90,7 @@ esp_err_t config_init(void) {
     return err;
 }
 
-// MODIFIED: config_load() — FIX: blob size guard added.
-// nvs_get_blob() updates sz to the actual number of bytes read.  If the
-// stored blob is smaller than sizeof(*cfg) (e.g. written by a much older
-// firmware before the version field existed), the remaining bytes of *cfg
-// are left in the default-initialised state from config_defaults(), but the
-// version field may still match by coincidence.  The explicit size check
-// closes this gap: any size mismatch is treated as a schema error and
-// defaults are applied.
+
 esp_err_t config_load(wspr_config_t *cfg) {
     config_defaults(cfg);
 
@@ -124,10 +117,6 @@ esp_err_t config_load(wspr_config_t *cfg) {
         return err;
     }
 
-    // MODIFIED: explicit size check — if the stored blob is not exactly the
-    // current struct size, treat it as a schema mismatch and use defaults.
-    // This covers blobs written before the version field existed (sz < sizeof)
-    // and any future truncation or padding anomaly (sz > sizeof).
     if (sz != sizeof(*cfg)) {
         ESP_LOGW(TAG, "Config blob size mismatch (stored=%u expected=%u), using defaults", (unsigned)sz, (unsigned)sizeof(*cfg));
         config_defaults(cfg);
