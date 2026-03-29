@@ -150,8 +150,13 @@ static void wspr_transmit(void) {
 
     uint32_t tx_start_us = (uint32_t)esp_timer_get_time();
 
-    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz", BAND_NAME[g_band_idx],
-             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx));
+    // MODIFIED 3.20: log stack high-watermark at TX start to help diagnose
+    // stack overflows during the ~110 s transmission window.  The scheduler_task
+    // stack is 8 KiB; this value confirms how much headroom remains at TX entry.
+    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz stack HWM=%u bytes",
+             BAND_NAME[g_band_idx],
+             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx),
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;

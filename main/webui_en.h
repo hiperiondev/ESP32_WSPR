@@ -30,7 +30,9 @@
 #define WEBUI_LABEL_LOCATOR      "Maidenhead Locator (4 char.)"
 #define WEBUI_LABEL_POWER        "TX Power (dBm)"
 #define WEBUI_LABEL_XTAL_CAL     "XTAL Calibration (ppb)"
-#define WEBUI_HINT_XTAL_CAL      "Crystal offset in ppb. 0=no correction. Effective after restart."
+// MODIFIED 3.18: removed "Effective after restart" — calibration is now applied
+// immediately when the config is saved via POST /api/config.
+#define WEBUI_HINT_XTAL_CAL      "Crystal offset in ppb. 0=no correction."
 #define WEBUI_BTN_SAVE           "&#128190; Save configuration"
 
 // WiFi card

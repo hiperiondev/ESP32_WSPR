@@ -30,7 +30,9 @@
 #define WEBUI_LABEL_LOCATOR      "Localizador Maidenhead (4 car.)"
 #define WEBUI_LABEL_POWER        "Potencia TX (dBm)"
 #define WEBUI_LABEL_XTAL_CAL     "Calibraci&#243;n XTAL (ppb)"
-#define WEBUI_HINT_XTAL_CAL      "Compensaci&#243;n del cristal en ppb. 0&#61;sin correcci&#243;n. Efectivo al reiniciar."
+// MODIFIED 3.18: removed "Efectivo al reiniciar" — la calibracion se aplica
+// inmediatamente al guardar la configuracion via POST /api/config.
+#define WEBUI_HINT_XTAL_CAL      "Compensaci&#243;n del cristal en ppb. 0&#61;sin correcci&#243;n."
 #define WEBUI_BTN_SAVE           "&#128190; Guardar configuraci&#243;n"
 
 // WiFi card

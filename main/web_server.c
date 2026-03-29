@@ -27,6 +27,10 @@
 #include "cJSON.h"
 #include "config.h"
 #include "esp_http_server.h"
+// MODIFIED 3.18: include oscillator header to call oscillator_set_cal() immediately
+// after xtal_cal_ppb is updated via POST /api/config, so calibration takes effect
+// without requiring a reboot.
+#include "oscillator.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/semphr.h"
@@ -127,6 +131,12 @@ static const char INDEX_HTML[] =
     ".btn-reset:hover{background:var(--red);color:#fff}"
     "</style></head><body>"
     "<h1>&#128225; WSPR Transmitter</h1>"
+    // MODIFIED 3.17: add security notice — the config API has no authentication;
+    // the operator should be aware this interface is accessible to any device on
+    // the same Wi-Fi network.
+    "<p style='text-align:center;color:#92400e;font-size:.78em;margin-bottom:4px'>"
+    "&#9888; The configuration interface has no authentication. "
+    "Use on a trusted local network only.</p>"
     // ADDED: reboot info subtitle div — populated by JS after the first status poll
     "<div id='reboot_info' class='reboot-info'></div>"
     "<button class='btn-reset' onclick='resetESP()'>&#9211; Reset ESP32</button>"
@@ -687,7 +697,17 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     }
 
     wspr_config_t cfg_snap = *_cfg;
+    // MODIFIED 3.18: snapshot the new calibration value before releasing the
+    // lock so we can apply it to the oscillator driver without holding the mutex.
+    int32_t new_cal_ppb = cfg_snap.xtal_cal_ppb;
     web_server_cfg_unlock();
+
+    // MODIFIED 3.18: apply the new crystal calibration immediately so it takes
+    // effect on the next oscillator_set_freq() call without requiring a reboot.
+    // oscillator_set_cal() only stores the ppb value internally; it does not
+    // reprogram hardware until the next frequency-set call, making this safe
+    // to call from the HTTP task at any time, even during an active TX.
+    oscillator_set_cal(new_cal_ppb);
 
     cJSON_Delete(j);
 
