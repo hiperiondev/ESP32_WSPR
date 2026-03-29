@@ -26,11 +26,11 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_system.h"  // ADDED: for esp_reset_reason() and esp_reset_reason_t
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-// ADDED §5 WSPR_TASK_WDT_ENABLE: include task WDT header conditionally
+
 #if CONFIG_WSPR_TASK_WDT_ENABLE
 #include "esp_task_wdt.h"
 #endif
@@ -60,12 +60,6 @@ static const char *TAG = "wspr_main";
 
 // Global live config
 static wspr_config_t g_cfg;
-
-// MODIFIED 3.22: replaced uint64_t g_boot_us with uint32_t g_boot_uptime_sec.
-// The 64-bit microsecond timestamp required a 64-bit software division each time
-// status_task computed boot wall-clock time. Converting to seconds once at startup
-// in app_main (single 64-bit divide, compile-time, negligible cost) and storing
-// only the uint32_t seconds value eliminates all 64-bit runtime divisions.
 static uint32_t g_boot_uptime_sec = 0;
 
 // Hop state
@@ -82,21 +76,30 @@ static int g_hop_ptr = 0;
 static volatile bool g_tx_active = false;
 static volatile int g_symbol_idx = 0;
 
-// ADDED: convert esp_reset_reason_t to a short human-readable English string.
-// Returns a pointer to a string literal in flash; never free it.
 static const char *reset_reason_to_str(esp_reset_reason_t r) {
     switch (r) {
-        case ESP_RST_POWERON:   return "Power-on";
-        case ESP_RST_EXT:       return "External pin";
-        case ESP_RST_SW:        return "Software";
-        case ESP_RST_PANIC:     return "Panic/exception";
-        case ESP_RST_INT_WDT:   return "Interrupt watchdog";
-        case ESP_RST_TASK_WDT:  return "Task watchdog";
-        case ESP_RST_WDT:       return "Other watchdog";
-        case ESP_RST_DEEPSLEEP: return "Deep-sleep wake";
-        case ESP_RST_BROWNOUT:  return "Brownout";
-        case ESP_RST_SDIO:      return "SDIO reset";
-        default:                return "Unknown";
+        case ESP_RST_POWERON:
+            return "Power-on";
+        case ESP_RST_EXT:
+            return "External pin";
+        case ESP_RST_SW:
+            return "Software";
+        case ESP_RST_PANIC:
+            return "Panic/exception";
+        case ESP_RST_INT_WDT:
+            return "Interrupt watchdog";
+        case ESP_RST_TASK_WDT:
+            return "Task watchdog";
+        case ESP_RST_WDT:
+            return "Other watchdog";
+        case ESP_RST_DEEPSLEEP:
+            return "Deep-sleep wake";
+        case ESP_RST_BROWNOUT:
+            return "Brownout";
+        case ESP_RST_SDIO:
+            return "SDIO reset";
+        default:
+            return "Unknown";
     }
 }
 
@@ -132,12 +135,12 @@ static void select_next_band(bool force_next) {
 static void wspr_transmit(void) {
     uint8_t symbols[WSPR_SYMBOLS];
 
-    // MODIFIED 3.9: expanded error message identifies which field is invalid
-    // and what the required format is, replacing the generic "check callsign/locator".
     if (wspr_encode(g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm, symbols) < 0) {
-        ESP_LOGE(TAG, "WSPR encode failed: cs='%s' loc='%s' -- "
-                 "callsign must be <=6 chars with digit at pos 2 or 3; "
-                 "locator must be exactly 4 chars (AA00 format)",
+        ESP_LOGE(TAG,
+                 "WSPR encode failed: cs='%s' loc='%s' -- "
+                 "callsign must be 1-6 chars with digit at pos 2 after normalization "
+                 "(e.g. LU3VEA, VK2ABC, W1AW, G4JNT); "
+                 "locator must be exactly 4 chars (AA00 format, e.g. FF61, GF05)",
                  g_cfg.callsign, g_cfg.locator);
         return;
     }
@@ -150,9 +153,9 @@ static void wspr_transmit(void) {
     uint32_t base_hz = config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx) + 1500u;
     oscillator_set_freq(base_hz);
     gpio_filter_select(BAND_FILTER[g_band_idx]);
-    // MODIFIED §5 WSPR_LPF_SETTLE_MS: settle time now driven by Kconfig
-    // instead of the previous hard-coded 10 ms constant.
-    // Mechanical relays typically need 5-20 ms; solid-state relays 1-5 ms.
+    // WSPR_LPF_SETTLE_MS: settle time driven by Kconfig
+    //  instead of the previous hard-coded 10 ms constant.
+    //  Mechanical relays typically need 5-20 ms; solid-state relays 1-5 ms.
     vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
 
     oscillator_enable(true);
@@ -160,18 +163,16 @@ static void wspr_transmit(void) {
 
     uint32_t tx_start_us = (uint32_t)esp_timer_get_time();
 
-    // MODIFIED 3.20: log stack high-watermark at TX start to help diagnose
+    // log stack high-watermark at TX start to help diagnose
     // stack overflows during the ~110 s transmission window.  The scheduler_task
     // stack is 8 KiB; this value confirms how much headroom remains at TX entry.
-    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz stack HWM=%u bytes",
-             BAND_NAME[g_band_idx],
-             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx),
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz stack HWM=%u bytes", BAND_NAME[g_band_idx],
+             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx), (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;
 
-        // ADDED §5 WSPR_TASK_WDT_ENABLE: feed the task watchdog at every symbol
+        // WSPR_TASK_WDT_ENABLE: feed the task watchdog at every symbol
         // boundary (~683 ms interval) to prove the scheduler task is alive.
         // Without this the WDT fires during the ~110 s TX window if the timeout
         // is shorter than the full transmission duration.
@@ -190,13 +191,11 @@ static void wspr_transmit(void) {
                 break;
             uint32_t rem = target_us - elapsed;
             if (rem > 10000u) {
-                // FIXED: the original "rem / 1000u - 5u" underflows to ~4 billion
-                // when rem is between 1000 and 5000 us (rem/1000 < 5), causing
-                // vTaskDelay to block the TX task for approximately 49 days.
-                // Guard the subtraction so sleep_ms is always at least 1.
                 uint32_t sleep_ms = rem / 1000u;
-                if (sleep_ms > 5u) sleep_ms -= 5u;
-                else sleep_ms = 1u;
+                if (sleep_ms > 5u)
+                    sleep_ms -= 5u;
+                else
+                    sleep_ms = 1u;
                 vTaskDelay(pdMS_TO_TICKS(sleep_ms));
             } else if (rem > 1000u) {
                 vTaskDelay(1);
@@ -205,7 +204,7 @@ static void wspr_transmit(void) {
             }
         }
 
-        // ADDED §5 WSPR_SYMBOL_OVERRUN_LOG: warn when the actual elapsed time
+        // WSPR_SYMBOL_OVERRUN_LOG: warn when the actual elapsed time
         // at symbol boundary exceeds the ideal deadline by more than 10 ms.
         // Overruns indicate scheduler jitter or ISR load that may cause audible
         // frequency discontinuities; useful during initial hardware calibration.
@@ -213,8 +212,7 @@ static void wspr_transmit(void) {
         {
             uint32_t actual_us = (uint32_t)esp_timer_get_time() - tx_start_us;
             if (actual_us > target_us + 10000u) {
-                ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lu actual=%lu overrun=%lu us",
-                         i, (unsigned long)target_us, (unsigned long)actual_us,
+                ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lu actual=%lu overrun=%lu us", i, (unsigned long)target_us, (unsigned long)actual_us,
                          (unsigned long)(actual_us - target_us));
             }
         }
@@ -227,12 +225,10 @@ static void wspr_transmit(void) {
     ESP_LOGI(TAG, "TX complete");
 }
 
-// ADDED: status_task now computes boot wall-clock time once after NTP/GPS sync
-// and pushes it to web_server via web_server_set_reboot_info().
 static void status_task(void *arg) {
     char time_str[24] = "---";
     char freq_str[24] = "---";
-    // ADDED: flag ensures boot time is computed and pushed exactly once
+    // flag ensures boot time is computed and pushed exactly once
     bool reboot_info_time_set = false;
 
     while (1) {
@@ -244,11 +240,6 @@ static void status_task(void *arg) {
             gmtime_r(&tv.tv_sec, &t);
             strftime(time_str, sizeof(time_str), "%H:%M:%S UTC", &t);
 
-            // MODIFIED 3.22: use g_boot_uptime_sec (uint32_t) instead of the
-            // former g_boot_us (uint64_t) to avoid a 64-bit software division
-            // on every status poll.  g_boot_uptime_sec is computed once at
-            // app_main entry using a single 64-bit divide, stored as uint32_t,
-            // and all arithmetic here is purely 32-bit.
             if (!reboot_info_time_set) {
                 time_t boot_ts = tv.tv_sec - (time_t)g_boot_uptime_sec;
                 struct tm bt;
@@ -287,7 +278,7 @@ static void status_task(void *arg) {
 static void scheduler_task(void *arg) {
     ESP_LOGI(TAG, "Scheduler started — waiting for time sync");
 
-    // ADDED §5 WSPR_TASK_WDT_ENABLE: subscribe this task to the ESP-IDF
+    // WSPR_TASK_WDT_ENABLE: subscribe this task to the ESP-IDF
     // task watchdog so a hard-hang is detected and triggers a reboot.
     // esp_task_wdt_reset() is called every symbol (~683 ms) during TX;
     // during idle the scheduler loops on vTaskDelay(1000) which keeps
@@ -299,7 +290,7 @@ static void scheduler_task(void *arg) {
     select_next_band(false);
 
     uint32_t last_hop_ts = 0;
-    // MODIFIED 3.11: initialize to 100 so the very first eligible TX slot fires
+    // initialize to 100 so the very first eligible TX slot fires
     // immediately. With 0 the Bresenham accumulator requires one full duty cycle
     // of slots to expire before the first TX, which delays the first transmission
     // and produces unexpected behavior after a duty-cycle config change.
@@ -338,7 +329,7 @@ static void scheduler_task(void *arg) {
         if (wait_sec > 0) {
             ESP_LOGI(TAG, "Next TX in %d s (band=%s)", wait_sec, BAND_NAME[g_band_idx]);
             // Coarse sleep until ~2 s before TX
-            // MODIFIED 3.13: cast to uint32_t before multiply so the
+            // cast to uint32_t before multiply so the
             // arithmetic is unsigned throughout, preventing signed overflow
             // if wait_sec were ever negative (time_sync_secs_to_next_tx()
             // guarantees >= 1, but a defensive explicit cast is wise).
@@ -380,7 +371,7 @@ static void scheduler_task(void *arg) {
             // Frequency hopping decision
             struct timeval tv;
             gettimeofday(&tv, NULL);
-            // MODIFIED 3.12: explicit mask makes the 64-bit time_t -> uint32_t
+            // explicit mask makes the 64-bit time_t -> uint32_t
             // truncation visible in source and suppresses compiler warnings on
             // platforms where time_t is wider than 32 bits.
             uint32_t now = (uint32_t)(tv.tv_sec & 0xFFFFFFFFUL);
@@ -431,17 +422,15 @@ static void scheduler_task(void *arg) {
     }
 }
 
-// ADDED: app_main captures boot timestamp and reset reason before any subsystem
-// initialisation, then passes the reason to the web server once mutexes exist.
 void app_main(void) {
-    // MODIFIED 3.22: capture boot uptime as uint32_t seconds instead of uint64_t
+    // capture boot uptime as uint32_t seconds instead of uint64_t
     // microseconds.  A single 64-bit divide is performed here once at startup;
     // status_task then uses only 32-bit arithmetic to compute boot wall-clock time.
     // esp_timer_get_time() returns microseconds since boot; dividing by 1000000
     // converts to seconds.  The result fits in uint32_t for any uptime < 136 years.
     g_boot_uptime_sec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
 
-    // ADDED: read reset reason before NVS or WiFi can trigger a secondary reset.
+    // read reset reason before NVS or WiFi can trigger a secondary reset.
     esp_reset_reason_t reset_rsn = esp_reset_reason();
 
     ESP_LOGI(TAG, "=== WSPR Transmitter for ESP32 ===");
@@ -480,7 +469,7 @@ void app_main(void) {
     // Push oscillator hardware detection result to the web status API.
     web_server_set_hw_status(oscillator_hw_ok(), oscillator_hw_name());
 
-    // ADDED: push reset reason into the status cache now that the mutex exists.
+    // push reset reason into the status cache now that the mutex exists.
     // The boot time string is left empty here; status_task fills it in once
     // NTP/GPS provides a valid wall-clock reference.
     web_server_set_reboot_info(NULL, reset_reason_to_str(reset_rsn));

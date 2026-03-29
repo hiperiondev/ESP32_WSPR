@@ -74,7 +74,7 @@ void web_server_update_status(bool time_ok, const char *time_str, const char *ba
 
 void web_server_set_hw_status(bool hw_ok, const char *hw_name);
 
-// ADDED: store last reboot wall-clock time and reset reason in status cache.
+// store last reboot wall-clock time and reset reason in status cache.
 // boot_time_str: formatted UTC date/time string (e.g. "2026-03-01 12:34 UTC"),
 //               or NULL to leave the previously stored value unchanged.
 // reason_str:   human-readable reset cause (e.g. "Power-on", "Watchdog"),

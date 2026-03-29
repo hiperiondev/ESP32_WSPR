@@ -30,8 +30,6 @@
 #define WEBUI_LABEL_LOCATOR      "Maidenhead Locator (4 char.)"
 #define WEBUI_LABEL_POWER        "TX Power (dBm)"
 #define WEBUI_LABEL_XTAL_CAL     "XTAL Calibration (ppb)"
-// MODIFIED 3.18: removed "Effective after restart" — calibration is now applied
-// immediately when the config is saved via POST /api/config.
 #define WEBUI_HINT_XTAL_CAL      "Crystal offset in ppb. 0=no correction."
 #define WEBUI_BTN_SAVE           "&#128190; Save configuration"
 
@@ -98,10 +96,8 @@
 #define WEBUI_JS_CONFIRM_RESET    "Restart ESP32?"
 #define WEBUI_JS_RESTARTING       "Restarting..."
 
-// ADDED: reboot info subtitle strings shown below the page title
 #define WEBUI_REBOOT_INFO_PREFIX  "Boot: "
 #define WEBUI_REBOOT_CAUSE_PREFIX " \u2502 Cause: "
 
-// ADDED 3.24: client-side validation error messages for callsign and locator
 #define WEBUI_JS_ERR_CALLSIGN "Invalid callsign (3-11 chars, A-Z 0-9 and space only)"
 #define WEBUI_JS_ERR_LOCATOR  "Invalid locator (4 chars: AA00 format, e.g. GF05)"

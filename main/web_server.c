@@ -27,13 +27,10 @@
 #include "cJSON.h"
 #include "config.h"
 #include "esp_http_server.h"
-// MODIFIED 3.18: include oscillator header to call oscillator_set_cal() immediately
-// after xtal_cal_ppb is updated via POST /api/config, so calibration takes effect
-// without requiring a reboot.
-#include "oscillator.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/semphr.h"
+#include "oscillator.h"
 #include "web_server.h"
 #include "webui_strings.h"
 #include "wifi_manager.h"
@@ -57,7 +54,6 @@ static const char INDEX_HTML[] =
     "body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;"
     "min-height:100vh;padding:20px}"
     "h1{text-align:center;color:var(--accent);margin-bottom:6px;font-size:1.6em}"
-    // ADDED: style for the reboot info subtitle line below the h1
     ".reboot-info{text-align:center;color:var(--sub);font-size:.78em;margin-bottom:16px;"
     "min-height:1.2em;letter-spacing:.01em}"
     ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;max-width:900px;margin:0 auto}"
@@ -131,13 +127,9 @@ static const char INDEX_HTML[] =
     ".btn-reset:hover{background:var(--red);color:#fff}"
     "</style></head><body>"
     "<h1>&#128225; WSPR Transmitter</h1>"
-    // MODIFIED 3.17: add security notice — the config API has no authentication;
-    // the operator should be aware this interface is accessible to any device on
-    // the same Wi-Fi network.
     "<p style='text-align:center;color:#92400e;font-size:.78em;margin-bottom:4px'>"
     "&#9888; The configuration interface has no authentication. "
     "Use on a trusted local network only.</p>"
-    // ADDED: reboot info subtitle div — populated by JS after the first status poll
     "<div id='reboot_info' class='reboot-info'></div>"
     "<button class='btn-reset' onclick='resetESP()'>&#9211; Reset ESP32</button>"
     "<div class='grid'>"
@@ -239,9 +231,7 @@ static const char INDEX_HTML[] =
 
     "let _hasPass=false;"
     "let _passEdited=false;"
-    // ADDED: flag to avoid re-writing the reboot subtitle on every status poll
     "let _rebootInfoSet=false;"
-    // MODIFIED 3.16: flag to show the settings-reset toast only once per session
     "let _settingsResetShown=false;"
 
     "function buildBands(enabled){"
@@ -299,10 +289,7 @@ static const char INDEX_HTML[] =
     "if(_passEdited){"
     "body.wifi_pass=document.getElementById('wifi_pass').value;"
     "}"
-    // MODIFIED 3.24: client-side validation before POST to give immediate feedback.
-    // Mirrors the server-side validate_callsign() and validate_locator() rules.
-    // Callsign: 3-11 chars, only A-Z 0-9 and space (no slash — encoder rejects it).
-    // Locator: exactly 4 chars matching [A-Ra-r][A-Ra-r][0-9][0-9].
+
     "if(!body.callsign||body.callsign.length<3||!/^[A-Z0-9 ]{3,11}$/.test(body.callsign)){"
     "toast('\u274c " WEBUI_JS_ERR_CALLSIGN "','err');return;}"
     "if(!body.locator||!/^[A-Ra-r]{2}[0-9]{2}$/.test(body.locator)){"
@@ -344,14 +331,12 @@ static const char INDEX_HTML[] =
     "`<span class='badge ok'>ON</span>`:`<span class='badge err'>OFF</span>`;"
     "document.getElementById('s_sym').textContent=s.tx_active?(s.symbol_idx+'/162'):'---';"
     "updateTxBtn(s.tx_enabled);"
-    // ADDED: populate reboot subtitle once after boot_time_str or reboot_reason arrive
     "if(!_rebootInfoSet&&(s.boot_time_str||s.reboot_reason)){"
     "let ri='';"
     "if(s.boot_time_str)ri+='" WEBUI_REBOOT_INFO_PREFIX "'+s.boot_time_str;"
     "if(s.reboot_reason)ri+='" WEBUI_REBOOT_CAUSE_PREFIX "'+s.reboot_reason;"
     "document.getElementById('reboot_info').textContent=ri;"
     "_rebootInfoSet=true;}"
-    // MODIFIED 3.16: show a one-time toast when settings were reset to defaults
     "if(!_settingsResetShown&&s.settings_reset){"
     "toast('\\u26a0 Settings were reset to factory defaults!','warn');"
     "_settingsResetShown=true;}"
@@ -359,7 +344,6 @@ static const char INDEX_HTML[] =
 
     "function toast(msg,type){"
     "const t=document.getElementById('toast');t.textContent=msg;"
-    // MODIFIED 3.16: added 'warn' type with amber border for factory-reset notification
     "t.style.display='block';t.style.borderColor=type==='ok'?'var(--green)':type==='warn'?'#92400e':'var(--red)';"
     "setTimeout(()=>t.style.display='none',3000);}"
 
@@ -434,7 +418,6 @@ static const char INDEX_HTML[] =
     "loadCfg();setInterval(pollStatus,2000);"
     "</script></body></html>";
 
-// ADDED: two new string fields for last-reboot time and reset cause
 typedef struct {
     bool time_ok;
     char time_str[24];
@@ -446,7 +429,6 @@ typedef struct {
     int symbol_idx;
     bool hw_ok;
     char hw_name[32];
-    // ADDED: last reboot wall-clock timestamp and reset reason string
     char reboot_time_str[32];
     char reboot_reason[32];
 } wspr_status_t;
@@ -495,8 +477,6 @@ void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
     ESP_LOGI("web", "HW status: %s — %s", hw_ok ? "OK" : "DUMMY", _status.hw_name);
 }
 
-// ADDED: store last reboot time and/or reset reason in the status cache.
-// Either argument may be NULL to leave the stored value unchanged.
 void web_server_set_reboot_info(const char *boot_time_str, const char *reason_str) {
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         if (boot_time_str) {
@@ -525,7 +505,7 @@ void web_server_cfg_unlock(void) {
 
 static bool validate_callsign(const char *s) {
     int len = (int)strlen(s);
-    // MODIFIED 3.24: minimum length is 3 (e.g. "N0X"), maximum is CALLSIGN_LEN-1.
+    // Mminimum length is 3 (e.g. "N0X"), maximum is CALLSIGN_LEN-1.
     // '/' was removed from the allowed set: wspr_encode pack_callsign() uses
     // char_to_wspr() which maps only 0-9, A-Z, and space (returning -1 for '/'),
     // so accepting '/' here would pass server validation but fail encoding.
@@ -710,12 +690,12 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     }
 
     wspr_config_t cfg_snap = *_cfg;
-    // MODIFIED 3.18: snapshot the new calibration value before releasing the
+    // snapshot the new calibration value before releasing the
     // lock so we can apply it to the oscillator driver without holding the mutex.
     int32_t new_cal_ppb = cfg_snap.xtal_cal_ppb;
     web_server_cfg_unlock();
 
-    // MODIFIED 3.18: apply the new crystal calibration immediately so it takes
+    // apply the new crystal calibration immediately so it takes
     // effect on the next oscillator_set_freq() call without requiring a reboot.
     // oscillator_set_cal() only stores the ppb value internally; it does not
     // reprogram hardware until the next frequency-set call, making this safe
@@ -754,7 +734,6 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ADDED: reboot_time_str and reboot_reason are now included in every status response
 static esp_err_t h_status(httpd_req_t *req) {
     wspr_status_t snap = { 0 };
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -773,10 +752,10 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON_AddBoolToObject(j, "tx_active", snap.tx_active);
     cJSON_AddBoolToObject(j, "tx_enabled", snap.tx_enabled);
     cJSON_AddNumberToObject(j, "symbol_idx", snap.symbol_idx);
-    // ADDED: expose reboot info so the UI subtitle is populated from the API
+    // expose reboot info so the UI subtitle is populated from the API
     cJSON_AddStringToObject(j, "boot_time_str", snap.reboot_time_str);
     cJSON_AddStringToObject(j, "reboot_reason", snap.reboot_reason);
-    // MODIFIED 3.16: expose settings_reset flag so the JS shows a one-time
+    // expose settings_reset flag so the JS shows a one-time
     // toast when NVS config was discarded and defaults were applied this boot.
     cJSON_AddBoolToObject(j, "settings_reset", config_was_reset());
     char *s = cJSON_PrintUnformatted(j);

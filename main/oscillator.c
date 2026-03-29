@@ -107,17 +107,17 @@ static esp_err_t si5351_ping(void) {
     return err;
 }
 
-// MODIFIED 3.7: si_init_pll — replaced dead guard with explicit VCO range clamps
 static esp_err_t si_init_pll(void) {
     uint32_t xtal_mhz = _si_xtal / 1000000UL;
     uint32_t a = 900UL / xtal_mhz;
-    // MODIFIED 3.7: replaced dead guard condition with explicit VCO range clamps.
     // Si5351 PLL requires 600 MHz <= VCO <= 900 MHz (datasheet section 4).
     // a < 15 with any xtal >= 10 MHz yields VCO < 150 MHz (below minimum).
     // a > 90 with xtal = 10 MHz yields VCO > 900 MHz (above maximum).
     // The original condition (a*xtal/28.127 < 6) never triggered in practice.
-    if (a < 15UL) a = 15UL;
-    if (a > 90UL) a = 90UL;
+    if (a < 15UL)
+        a = 15UL;
+    if (a > 90UL)
+        a = 90UL;
     _si_vco = a * xtal_mhz * 1000000UL;
     uint32_t p1 = 128UL * a - 512UL;
     uint8_t pll_regs[8] = {
@@ -131,7 +131,6 @@ static esp_err_t si_init_pll(void) {
     return err;
 }
 
-// MODIFIED 3.6 + 3.8: si_set_freq_hz_mhz — R-divider comment + calibration sign fix
 static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
     if (_si_vco == 0) {
         ESP_LOGE(TAG, "SI5351: PLL not initialized");
@@ -140,7 +139,7 @@ static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
     uint8_t r_div_reg = 0;
     uint32_t eff_hz = freq_hz;
     uint16_t eff_mhz = frac_mhz;
-    // MODIFIED 3.6: R-divider doubles eff_hz up to 7 times (divide-by-128 maximum).
+    // R-divider doubles eff_hz up to 7 times (divide-by-128 maximum).
     // Minimum usable input frequency is approximately 500 kHz / 128 = 3.9 kHz.
     // For 2200 m (137.6 kHz): 5 doublings reach ~4.4 MHz, within MS0 divider range.
     // r_div_reg value is stored in MS0_REG[2] bits [6:4] (see si5351 datasheet table 8).
@@ -150,7 +149,6 @@ static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
         r_div_reg++;
         configASSERT(eff_mhz < 1000U);
     }
-    // MODIFIED 3.8: fixed calibration sign inversion and simplified formula.
     // Positive ppb means the crystal runs fast: actual VCO > nominal, output too high.
     // To compensate we must DECREASE the effective VCO, not increase it.
     // Previous code added delta (wrong sign), making the frequency error larger.
@@ -241,20 +239,19 @@ static int32_t _ad_cal = 0;
 
 static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// FIXED: replaced 64-bit ULL constant with equivalent 32-bit arithmetic.
 // Identity: 2^32 / ref_khz  ==  (2^32/1000) / (ref_hz/1000000)
 //         = 4294967 / ref_mhz   (floor; ref must be an integer MHz value).
 // Verification 125 MHz: 4294967/125 = 34359  vs  4294967296/125000 = 34359  [identical]
 // Verification 100 MHz: 4294967/100 = 42949  vs  4294967296/100000 = 42949  [identical]
 // No 64-bit intermediate produced; compiler evaluates entirely at compile-time.
 #define AD9850_SCALE_KHZ (4294967UL / ((uint32_t)AD9850_REF_CLK / 1000000UL))
-// ADDED 3.27: compile-time overflow guard for the AD9850 frequency-tuning word.
+// compile-time overflow guard for the AD9850 frequency-tuning word.
 // Max WSPR frequency: 28 126 100 Hz (10 m dial) + 1500 Hz offset + 4395 mHz symbol
 // offset ~ 28 128 kHz. Verify that freq_khz * AD9850_SCALE_KHZ fits in uint32_t.
 // For 125 MHz ref: 28200 * 34359 = 968 922 600 < 0xFFFFFFFF. Safe for all WSPR bands.
 // Note: this assert uses the compile-time ref_mhz divisor matching the macro above.
 static_assert((28200UL * (4294967UL / ((uint32_t)AD9850_REF_CLK / 1000000UL))) < 0xFFFFFFFFUL,
-    "AD9850 FTW overflow: max WSPR frequency word must fit in 32 bits for the configured ref clock");
+              "AD9850 FTW overflow: max WSPR frequency word must fit in 32 bits for the configured ref clock");
 
 static uint32_t ad9850_freq_word(uint32_t freq_hz) {
     if (_ad_cal != 0) {
@@ -266,7 +263,7 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
             ppb_abs = (uint32_t)(-(uint32_t)_ad_cal);
         }
         uint32_t delta_hz = (freq_hz / 1000u) * ppb_abs / 1000000u;
-        // FIXED: positive ppb means the reference crystal oscillates faster than
+        // positive ppb means the reference crystal oscillates faster than
         // its nominal frequency.  Because FTW = freq * 2^32 / ref_actual and
         // ref_actual > ref_nominal, the AD9850 output is already too LOW.
         // To compensate we must INCREASE the programmed freq_hz, not decrease it.

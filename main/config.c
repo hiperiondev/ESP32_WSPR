@@ -29,7 +29,7 @@
 static const char *TAG = "config";
 #define NVS_NS "wspr"
 
-// MODIFIED 3.16: set to true in config_load() when stored config is discarded
+// set to true in config_load() when stored config is discarded
 // due to blob size mismatch or schema version mismatch; queried by web_server
 // to display a one-time "settings reset to defaults" warning in the UI.
 static bool _was_reset = false;
@@ -166,14 +166,14 @@ esp_err_t config_load(wspr_config_t *cfg) {
     if (sz != sizeof(*cfg)) {
         ESP_LOGW(TAG, "Config blob size mismatch (stored=%u expected=%u), using defaults", (unsigned)sz, (unsigned)sizeof(*cfg));
         config_defaults(cfg);
-        _was_reset = true; // MODIFIED 3.16: flag reset so UI can warn user
+        _was_reset = true; // flag reset so UI can warn user
         return ESP_OK;
     }
 
     if (cfg->version != CONFIG_SCHEMA_VERSION) {
         ESP_LOGW(TAG, "Config schema mismatch (stored=%u expected=%u), using defaults", cfg->version, (unsigned)CONFIG_SCHEMA_VERSION);
         config_defaults(cfg);
-        _was_reset = true; // MODIFIED 3.16: flag reset so UI can warn user
+        _was_reset = true; // flag reset so UI can warn user
         return ESP_OK;
     }
 
@@ -183,11 +183,11 @@ esp_err_t config_load(wspr_config_t *cfg) {
     cfg->wifi_pass[sizeof(cfg->wifi_pass) - 1] = '\0';
     cfg->ntp_server[sizeof(cfg->ntp_server) - 1] = '\0';
 
-    // ADDED: clamp iaru_region to valid range 1-3; fix any corrupt NVS value.
+    // clamp iaru_region to valid range 1-3; fix any corrupt NVS value.
     if (cfg->iaru_region < 1 || cfg->iaru_region > 3)
         cfg->iaru_region = (uint8_t)IARU_REGION_1;
 
-    // MODIFIED 3.12: clamp hop_interval_sec to the minimum of one WSPR TX slot.
+    // clamp hop_interval_sec to the minimum of one WSPR TX slot.
     // A corrupt or legacy NVS value below 120 s would rotate bands on every
     // scheduler iteration instead of once per slot, breaking normal operation.
     if (cfg->hop_interval_sec < 120u)
@@ -213,8 +213,6 @@ esp_err_t config_save(const wspr_config_t *cfg) {
     return err;
 }
 
-// MODIFIED 3.16: return true if config_load() discarded stored settings
-// this boot due to schema or size mismatch, false otherwise.
 bool config_was_reset(void) {
     return _was_reset;
 }

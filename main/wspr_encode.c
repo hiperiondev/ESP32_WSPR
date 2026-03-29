@@ -66,18 +66,21 @@ static int pack_callsign(const char *cs, uint32_t *out) {
     int len = (int)strlen(cs);
     if (len < 1 || len > 6)
         return -1;
-    // WSPR rule: position 2 (0-indexed) MUST be a digit.
-    // If cs[1] is a letter (e.g. "G4JNT"), shift right and prepend a space: " G4JNT".
-    if (len >= 2 && !isdigit((unsigned char)cs[1])) {
-        if (len > 5)
-            return -1; // no room to prepend
-        buf[0] = ' ';
-        memcpy(buf + 1, cs, (size_t)len);
-    } else {
-        memcpy(buf, cs, (size_t)len);
-    }
-    // buf is now exactly 6 chars, right-padded with spaces
+    // WSPR rule: position 2 (0-indexed) MUST be a digit after normalization.
+    // Right-pad callsign into buf first, then decide whether a prepend is needed.
+    memcpy(buf, cs, (size_t)len);
     buf[6] = '\0';
+    // If buf[2] is not a digit, shift right one position and prepend a space.
+    // This handles one-letter-prefix callsigns like G4JNT -> " G4JNT",
+    // W1AW -> " W1AW ", K1JT -> " K1JT ".
+    if (!isdigit((unsigned char)buf[2])) {
+        if (len > 5)
+            return -1; // no room to prepend space
+        // shift right from index len down to 1, then set buf[0]=' '
+        for (int i = len; i > 0; i--)
+            buf[i] = buf[i - 1];
+        buf[0] = ' ';
+    }
     // Position 2 must be a digit after normalization
     if (!isdigit((unsigned char)buf[2]))
         return -1;
@@ -91,8 +94,9 @@ static int pack_callsign(const char *cs, uint32_t *out) {
     int c5 = suffix_val(buf[5]);
     if (c0 < 0 || c1 < 0)
         return -1;
-    // c1 can never be space here: if cs started with two letters,
-    // normalization above prepended a space, making buf[1] a letter.
+    // c1 can never be space: a one-letter prefix like "W" at buf[0] after prepend
+    // leaves buf[1] as the first letter of the original callsign (e.g. '1' digit or
+    // a letter). Space at buf[1] is impossible for any valid ham callsign.
     // The guard is kept as a safety net only.
     if (c1 > 35)
         return -1;

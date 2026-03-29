@@ -237,8 +237,6 @@ char *wifi_manager_scan(void) {
         // interface PHY has time to initialise before the scan starts.
         // Without this delay, esp_wifi_scan_start() runs before the STA
         // radio is ready and consistently returns 0 results.
-        // MODIFIED 3.15: increased from 150 ms — some RF front-ends need
-        // more time to initialise the STA interface after APSTA mode switch.
         vTaskDelay(pdMS_TO_TICKS(300));
         elevated = true;
     }
@@ -247,10 +245,9 @@ char *wifi_manager_scan(void) {
     wifi_scan_config_t scan_cfg = { 0 };
     esp_err_t err = esp_wifi_scan_start(&scan_cfg, true); // true = blocking
     if (err != ESP_OK) {
-        // MODIFIED 3.15: distinct log message for scan-start failure so the
+        // distinct log message for scan-start failure so the
         // user can tell "interface not ready" from other failure causes.
-        ESP_LOGW(TAG, "scan: start failed (%s) — likely STA interface not ready",
-                 esp_err_to_name(err));
+        ESP_LOGW(TAG, "scan: start failed (%s) — likely STA interface not ready", esp_err_to_name(err));
         if (elevated) {
             esp_wifi_set_mode(WIFI_MODE_AP);
         }
@@ -267,7 +264,7 @@ char *wifi_manager_scan(void) {
     uint16_t count = 0;
     esp_wifi_scan_get_ap_num(&count);
     if (count == 0) {
-        // MODIFIED 3.15: log "no APs found" separately from scan-start failure
+        // log "no APs found" separately from scan-start failure
         ESP_LOGI(TAG, "scan: completed but no APs found");
         if (elevated) {
             esp_wifi_set_mode(WIFI_MODE_AP);
