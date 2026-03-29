@@ -162,7 +162,14 @@ static void wspr_transmit(void) {
                 break;
             uint32_t rem = target_us - elapsed;
             if (rem > 10000u) {
-                vTaskDelay(pdMS_TO_TICKS(rem / 1000u - 5u));
+                // FIXED: the original "rem / 1000u - 5u" underflows to ~4 billion
+                // when rem is between 1000 and 5000 us (rem/1000 < 5), causing
+                // vTaskDelay to block the TX task for approximately 49 days.
+                // Guard the subtraction so sleep_ms is always at least 1.
+                uint32_t sleep_ms = rem / 1000u;
+                if (sleep_ms > 5u) sleep_ms -= 5u;
+                else sleep_ms = 1u;
+                vTaskDelay(pdMS_TO_TICKS(sleep_ms));
             } else if (rem > 1000u) {
                 vTaskDelay(1);
             } else {

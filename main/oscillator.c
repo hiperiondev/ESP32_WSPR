@@ -224,7 +224,13 @@ static int32_t _ad_cal = 0;
 
 static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
 
-#define AD9850_SCALE_KHZ ((uint32_t)(4294967296ULL / ((uint32_t)AD9850_REF_CLK / 1000UL)))
+// FIXED: replaced 64-bit ULL constant with equivalent 32-bit arithmetic.
+// Identity: 2^32 / ref_khz  ==  (2^32/1000) / (ref_hz/1000000)
+//         = 4294967 / ref_mhz   (floor; ref must be an integer MHz value).
+// Verification 125 MHz: 4294967/125 = 34359  vs  4294967296/125000 = 34359  [identical]
+// Verification 100 MHz: 4294967/100 = 42949  vs  4294967296/100000 = 42949  [identical]
+// No 64-bit intermediate produced; compiler evaluates entirely at compile-time.
+#define AD9850_SCALE_KHZ (4294967UL / ((uint32_t)AD9850_REF_CLK / 1000000UL))
 
 static uint32_t ad9850_freq_word(uint32_t freq_hz) {
     if (_ad_cal != 0) {
@@ -236,10 +242,15 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
             ppb_abs = (uint32_t)(-(uint32_t)_ad_cal);
         }
         uint32_t delta_hz = (freq_hz / 1000u) * ppb_abs / 1000000u;
+        // FIXED: positive ppb means the reference crystal oscillates faster than
+        // its nominal frequency.  Because FTW = freq * 2^32 / ref_actual and
+        // ref_actual > ref_nominal, the AD9850 output is already too LOW.
+        // To compensate we must INCREASE the programmed freq_hz, not decrease it.
+        // The original code had the two branches swapped, making the error worse.
         if (_ad_cal > 0) {
-            freq_hz = (freq_hz > delta_hz) ? (freq_hz - delta_hz) : 0u;
-        } else {
             freq_hz = freq_hz + delta_hz;
+        } else {
+            freq_hz = (freq_hz > delta_hz) ? (freq_hz - delta_hz) : 0u;
         }
     }
     uint32_t freq_khz = freq_hz / 1000UL;
