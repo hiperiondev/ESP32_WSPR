@@ -231,6 +231,8 @@ static const char INDEX_HTML[] =
     "let _passEdited=false;"
     // ADDED: flag to avoid re-writing the reboot subtitle on every status poll
     "let _rebootInfoSet=false;"
+    // MODIFIED 3.16: flag to show the settings-reset toast only once per session
+    "let _settingsResetShown=false;"
 
     "function buildBands(enabled){"
     "const c=document.getElementById('bands');c.innerHTML='';"
@@ -331,11 +333,16 @@ static const char INDEX_HTML[] =
     "if(s.reboot_reason)ri+='" WEBUI_REBOOT_CAUSE_PREFIX "'+s.reboot_reason;"
     "document.getElementById('reboot_info').textContent=ri;"
     "_rebootInfoSet=true;}"
+    // MODIFIED 3.16: show a one-time toast when settings were reset to defaults
+    "if(!_settingsResetShown&&s.settings_reset){"
+    "toast('\\u26a0 Settings were reset to factory defaults!','warn');"
+    "_settingsResetShown=true;}"
     "}catch(e){}}"
 
     "function toast(msg,type){"
     "const t=document.getElementById('toast');t.textContent=msg;"
-    "t.style.display='block';t.style.borderColor=type==='ok'?'var(--green)':'var(--red)';"
+    // MODIFIED 3.16: added 'warn' type with amber border for factory-reset notification
+    "t.style.display='block';t.style.borderColor=type==='ok'?'var(--green)':type==='warn'?'#92400e':'var(--red)';"
     "setTimeout(()=>t.style.display='none',3000);}"
 
     "async function scanWifi(){"
@@ -736,6 +743,9 @@ static esp_err_t h_status(httpd_req_t *req) {
     // ADDED: expose reboot info so the UI subtitle is populated from the API
     cJSON_AddStringToObject(j, "boot_time_str", snap.reboot_time_str);
     cJSON_AddStringToObject(j, "reboot_reason", snap.reboot_reason);
+    // MODIFIED 3.16: expose settings_reset flag so the JS shows a one-time
+    // toast when NVS config was discarded and defaults were applied this boot.
+    cJSON_AddBoolToObject(j, "settings_reset", config_was_reset());
     char *s = cJSON_PrintUnformatted(j);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, s, strlen(s));

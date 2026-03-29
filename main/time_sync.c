@@ -19,6 +19,8 @@
  *
  */
  
+// MODIFIED 3.14: added ctype.h for isxdigit(), isdigit(), toupper() used in GPS mode
+#include <ctype.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>

@@ -115,3 +115,7 @@ esp_err_t config_init(void);
 esp_err_t config_load(wspr_config_t *cfg);
 esp_err_t config_save(const wspr_config_t *cfg);
 void config_defaults(wspr_config_t *cfg);
+// MODIFIED 3.16: returns true if config was reset to defaults this boot
+// (schema version mismatch or blob size mismatch); false on normal load.
+// Call after config_load(). Safe from any task after startup.
+bool config_was_reset(void);

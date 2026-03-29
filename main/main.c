@@ -290,10 +290,20 @@ static void scheduler_task(void *arg) {
         if (wait_sec > 0) {
             ESP_LOGI(TAG, "Next TX in %d s (band=%s)", wait_sec, BAND_NAME[g_band_idx]);
             // Coarse sleep until ~2 s before TX
-            if (wait_sec > 3)
-                vTaskDelay(pdMS_TO_TICKS((uint32_t)(wait_sec - 2) * 1000u));
+            // MODIFIED 3.13: cast to uint32_t before multiply so the
+            // arithmetic is unsigned throughout, preventing signed overflow
+            // if wait_sec were ever negative (time_sync_secs_to_next_tx()
+            // guarantees >= 1, but a defensive explicit cast is wise).
+            if (wait_sec > 3) {
+                uint32_t sleep_ms = (uint32_t)(wait_sec - 2) * 1000u;
+                vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+            }
 
             // Fine busy-wait: tolerant window fires when tv_sec%120 is in [1..5].
+            // NOTE 3.13: if this task is blocked in web_server_cfg_lock() by a
+            // concurrent HTTP request for more than 5 s, phase will exceed 5
+            // when it resumes and the slot is missed gracefully — the scheduler
+            // waits for the next even-minute boundary without further action.
             for (;;) {
                 struct timeval tv;
                 gettimeofday(&tv, NULL);

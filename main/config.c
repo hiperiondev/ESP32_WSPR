@@ -29,6 +29,11 @@
 static const char *TAG = "config";
 #define NVS_NS "wspr"
 
+// MODIFIED 3.16: set to true in config_load() when stored config is discarded
+// due to blob size mismatch or schema version mismatch; queried by web_server
+// to display a one-time "settings reset to defaults" warning in the UI.
+static bool _was_reset = false;
+
 // 60 m dial frequencies by region (source: IARU band plans + WSPRnet):
 //   Region 1 (EU/Africa)  : 5 288 600 Hz  (IARU R1 60 m WSPR allocation)
 //   Region 2 (Americas)   : 5 346 500 Hz  (FCC channels centre, ARRL coord.)
@@ -161,12 +166,14 @@ esp_err_t config_load(wspr_config_t *cfg) {
     if (sz != sizeof(*cfg)) {
         ESP_LOGW(TAG, "Config blob size mismatch (stored=%u expected=%u), using defaults", (unsigned)sz, (unsigned)sizeof(*cfg));
         config_defaults(cfg);
+        _was_reset = true; // MODIFIED 3.16: flag reset so UI can warn user
         return ESP_OK;
     }
 
     if (cfg->version != CONFIG_SCHEMA_VERSION) {
         ESP_LOGW(TAG, "Config schema mismatch (stored=%u expected=%u), using defaults", cfg->version, (unsigned)CONFIG_SCHEMA_VERSION);
         config_defaults(cfg);
+        _was_reset = true; // MODIFIED 3.16: flag reset so UI can warn user
         return ESP_OK;
     }
 
@@ -204,4 +211,10 @@ esp_err_t config_save(const wspr_config_t *cfg) {
 
     ESP_LOGI(TAG, "Config saved: cs=%s loc=%s pwr=%d dBm region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (int)cfg->iaru_region);
     return err;
+}
+
+// MODIFIED 3.16: return true if config_load() discarded stored settings
+// this boot due to schema or size mismatch, false otherwise.
+bool config_was_reset(void) {
+    return _was_reset;
 }
