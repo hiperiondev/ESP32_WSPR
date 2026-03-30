@@ -48,7 +48,7 @@
  * The oscillator API uses a split integer/milli-Hz representation to avoid
  * 64-bit software multiplications on the Xtensa LX6 core:
  *  - @p base_hz  : carrier frequency in whole Hz (uint32_t, max ~28.1 MHz).
- *  - @p offset_mhz : additional offset in **milli-Hz** (int32_t).
+ *  - @p offset_millihz : additional offset in milli-Hz (int32_t).
  *
  * For WSPR the maximum symbol offset is 3 × 1464.84375 mHz ≈ 4395 mHz,
  * well within the int32_t range.
@@ -121,7 +121,7 @@ esp_err_t oscillator_set_freq(uint32_t freq_hz);
  * without floating-point arithmetic.  The effective output frequency is:
  *
  * @code
- *   f_out = base_hz + offset_mhz / 1000  (Hz)
+ *   f_out = base_hz + offset_millihz / 1000  (Hz)
  * @endcode
  *
  * @par Si5351 implementation
@@ -137,13 +137,13 @@ esp_err_t oscillator_set_freq(uint32_t freq_hz);
  *
  * @param[in] base_hz     Carrier base frequency in Hz (same value as passed
  *                        to @ref oscillator_set_freq()).
- * @param[in] offset_mhz  Symbol tone offset in **milli-Hz** (NOT MHz despite
- *                        the parameter name, which is a legacy artefact).
- *                        Range for WSPR: 0 to 3 × 1465 = 4395 mHz.
+ * @param[in] offset_millihz  Symbol tone offset in milli-Hz.
+ *                            Renamed from offset_mhz to clarify units.
+ *                            Range for WSPR: 0 to 3 x 1465 = 4395 mHz.
  *
  * @return @c ESP_OK on success, or an error code on driver failure.
  */
-esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_mhz);
+esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz); // [FIX #11] renamed from offset_mhz
 
 /**
  * @brief Enable or disable the RF output of the oscillator.

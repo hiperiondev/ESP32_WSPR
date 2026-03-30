@@ -182,8 +182,8 @@ static void wspr_transmit(void) {
 #endif
 
         // Exact tone offset: symbol * 375000 / 256 milli-Hz.
-        int32_t tone_offset_mhz = (int32_t)((uint32_t)symbols[i] * WSPR_TONE_NUM / WSPR_TONE_DEN);
-        oscillator_set_freq_mhz(base_hz, tone_offset_mhz);
+        int32_t tone_offset_millihz = (int32_t)((uint32_t)symbols[i] * WSPR_TONE_NUM / WSPR_TONE_DEN);
+        oscillator_set_freq_mhz(base_hz, tone_offset_millihz);
 
         uint32_t target_us = (uint32_t)(i + 1) * 682667UL;
         for (;;) {
@@ -417,12 +417,9 @@ static void scheduler_task(void *arg) {
 }
 
 void app_main(void) {
-    // capture boot uptime as uint32_t seconds instead of uint64_t
-    // microseconds.  A single 64-bit divide is performed here once at startup;
-    // status_task then uses only 32-bit arithmetic to compute boot wall-clock time.
-    // esp_timer_get_time() returns microseconds since boot; dividing by 1000000
-    // converts to seconds.  The result fits in uint32_t for any uptime < 136 years.
-    g_boot_uptime_sec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+    // esp_log_timestamp() returns uint32_t ms since boot (no __divdi3 call needed).
+    // Dividing uint32_t ms by 1000u uses 32-bit integer division only.
+    g_boot_uptime_sec = (uint32_t)(esp_log_timestamp() / 1000u);
 
     // read reset reason before NVS or WiFi can trigger a secondary reset.
     esp_reset_reason_t reset_rsn = esp_reset_reason();

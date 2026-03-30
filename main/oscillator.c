@@ -136,7 +136,9 @@ static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
         vco_cal = (uint32_t)((int32_t)_si_vco + correction_hz);
     }
     uint32_t d_int = vco_cal / eff_hz;
-    if (d_int < 6UL || d_int > 1800UL) {
+    // Si5351 AN619: fractional mode MS output minimum divider is 8.
+    // Integer mode supports 4/6/8 but this driver always operates in fractional mode.
+    if (d_int < 8UL || d_int > 1800UL) {
         ESP_LOGE(TAG, "SI5351: divider %lu out of range (vco=%lu eff_hz=%lu)", (unsigned long)d_int, (unsigned long)vco_cal, (unsigned long)eff_hz);
         return ESP_ERR_INVALID_ARG;
     }
@@ -377,8 +379,9 @@ esp_err_t oscillator_set_freq(uint32_t freq_hz) {
     return ESP_OK;
 }
 
-esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_mhz) {
-    int32_t total_mhz = (int32_t)(base_hz % 1000UL) * 1000 + offset_mhz;
+// The value is in milli-Hz. Function name keeps the legacy "mhz" suffix for compatibility.
+esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz) {
+    int32_t total_mhz = (int32_t)(base_hz % 1000UL) * 1000 + offset_millihz;
     int32_t frac_mhz_s = total_mhz % 1000;
     int32_t extra_hz_s = total_mhz / 1000;
     if (frac_mhz_s < 0) {

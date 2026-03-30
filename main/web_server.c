@@ -563,8 +563,20 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     cJSON_AddNumberToObject(j, "hop_interval_sec", _cfg->hop_interval_sec);
     cJSON_AddBoolToObject(j, "tx_enabled", _cfg->tx_enabled);
     cJSON_AddNumberToObject(j, "tx_duty_pct", _cfg->tx_duty_pct);
-    cJSON_AddNumberToObject(j, "xtal_cal_ppb", (double)_cfg->xtal_cal_ppb);
-    cJSON_AddNumberToObject(j, "iaru_region", (double)_cfg->iaru_region);
+    // Avoid cJSON double FP emulation for these integer fields.
+    // cJSON_AddNumberToObject always converts to double internally, triggering
+    // software FP on Xtensa LX6 (no FPU). Use cJSON_AddRawToObject with
+    // snprintf-formatted decimal strings instead — exact, no floating-point code.
+    {
+        char _ppb_str[16];
+        snprintf(_ppb_str, sizeof(_ppb_str), "%ld", (long)_cfg->xtal_cal_ppb);
+        cJSON_AddRawToObject(j, "xtal_cal_ppb", _ppb_str);
+    }
+    {
+        char _reg_str[4];
+        snprintf(_reg_str, sizeof(_reg_str), "%u", (unsigned)_cfg->iaru_region);
+        cJSON_AddRawToObject(j, "iaru_region", _reg_str);
+    }
 
     cJSON *bands = cJSON_CreateArray();
     for (int i = 0; i < BAND_COUNT; i++)
@@ -758,10 +770,19 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON_AddStringToObject(j, "time_str", snap.time_str);
     cJSON_AddStringToObject(j, "band", snap.band);
     cJSON_AddStringToObject(j, "freq_str", snap.freq_str);
-    cJSON_AddNumberToObject(j, "next_tx_sec", snap.next_tx_sec);
+    // [FIX #9] Same fix as h_get_config: avoid double FP for integer status fields.
+    {
+        char _ntx_str[16];
+        snprintf(_ntx_str, sizeof(_ntx_str), "%ld", (long)snap.next_tx_sec);
+        cJSON_AddRawToObject(j, "next_tx_sec", _ntx_str);
+    }
     cJSON_AddBoolToObject(j, "tx_active", snap.tx_active);
     cJSON_AddBoolToObject(j, "tx_enabled", snap.tx_enabled);
-    cJSON_AddNumberToObject(j, "symbol_idx", snap.symbol_idx);
+    {
+        char _sym_str[8];
+        snprintf(_sym_str, sizeof(_sym_str), "%d", snap.symbol_idx);
+        cJSON_AddRawToObject(j, "symbol_idx", _sym_str);
+    }
     // expose reboot info so the UI subtitle is populated from the API
     cJSON_AddStringToObject(j, "boot_time_str", snap.reboot_time_str);
     cJSON_AddStringToObject(j, "reboot_reason", snap.reboot_reason);
