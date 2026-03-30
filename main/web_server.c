@@ -36,11 +36,12 @@
 #include "web_server.h"
 #include "webui_strings.h"
 #include "wifi_manager.h"
+#include "version.h"
 
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
 #include "mbedtls/base64.h"
 
-#define HTTP_AUTH_WARNING
+#define HTTP_AUTH_WARNING ""
 
 // check_auth: validate Authorization: Basic <b64> header against Kconfig credentials.
 // Returns true when credentials match, false when header is absent or wrong.
@@ -171,7 +172,10 @@ static const char INDEX_HTML[] =
     "cursor:pointer;transition:.2s;display:block;margin:0 auto 20px}"
     ".btn-reset:hover{background:var(--red);color:#fff}"
     "</style></head><body>"
-    "<h1>&#128225; WSPR Transmitter</h1>" HTTP_AUTH_WARNING "<div id='reboot_info' class='reboot-info'></div>"
+    "<h1>&#128225; WSPR Transmitter</h1>"
+	"<p style='text-align:center;color:#92400e;font-size:.78em;margin-bottom:4px'> FW Ver: " FW_VERSION_STRING "</p>"
+	HTTP_AUTH_WARNING
+	"<div id='reboot_info' class='reboot-info'></div>"
     "<button class='btn-reset' onclick='resetESP()'>&#9211; Reset ESP32</button>"
     "<div class='grid'>"
 

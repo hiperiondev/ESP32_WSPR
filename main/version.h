@@ -40,6 +40,10 @@
  */
 #define VERSION_PATCH 0
 
+////////////////////
 
+#define STR_HELPER(x) #x
+#define STR(x)        STR_HELPER(x)
+#define FW_VERSION_STRING STR(VERSION_MAYOR) "." STR(VERSION_MINOR) "." STR(VERSION_PATCH)
 
 #endif /* VERSION_H_ */
