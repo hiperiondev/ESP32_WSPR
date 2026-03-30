@@ -507,22 +507,36 @@ void web_server_update_status(bool time_ok, const char *time_str, const char *ba
     }
 }
 
+// web_server_set_hw_status: removed unsafe lockless fallback write.
+// If mutex is NULL (called before web_server_start), write directly because
+// we are still single-threaded at that point.
+// If mutex acquisition times out, log a warning and skip the update entirely
+// instead of writing to _status from two tasks simultaneously.
 void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
-    if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    // Called before web_server_start: mutex does not exist yet.
+    // At this point only app_main runs so a direct write is safe.
+    if (_status_mutex == NULL) {
         _status.hw_ok = hw_ok;
         if (hw_name) {
             strncpy(_status.hw_name, hw_name, sizeof(_status.hw_name) - 1);
             _status.hw_name[sizeof(_status.hw_name) - 1] = '\0';
         }
-        xSemaphoreGive(_status_mutex);
-    } else {
-        _status.hw_ok = hw_ok;
-        if (hw_name) {
-            strncpy(_status.hw_name, hw_name, sizeof(_status.hw_name) - 1);
-            _status.hw_name[sizeof(_status.hw_name) - 1] = '\0';
-        }
+        return;
     }
-    ESP_LOGI("web", "HW status: %s — %s", hw_ok ? "OK" : "DUMMY", _status.hw_name);
+    // Mutex exists: take it with a generous timeout so transient contention
+    // from status_task does not cause a missed update.
+    if (xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        // Abort rather than writing without the mutex (was the old else-branch).
+        ESP_LOGW(TAG, "hw_status: mutex timeout, skipping update");
+        return;
+    }
+    _status.hw_ok = hw_ok;
+    if (hw_name) {
+        strncpy(_status.hw_name, hw_name, sizeof(_status.hw_name) - 1);
+        _status.hw_name[sizeof(_status.hw_name) - 1] = '\0';
+    }
+    xSemaphoreGive(_status_mutex);
+    ESP_LOGI(TAG, "HW status: %s -- %s", hw_ok ? "OK" : "DUMMY", _status.hw_name);
 }
 
 void web_server_set_reboot_info(const char *boot_time_str, const char *reason_str) {
@@ -642,7 +656,6 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     char _hop_str[16];
     snprintf(_hop_str, sizeof(_hop_str), "%lu", (unsigned long)_cfg->hop_interval_sec);
     cJSON_AddRawToObject(j, "hop_interval_sec", _hop_str);
-    cJSON_AddNumberToObject(j, "hop_interval_sec", _cfg->hop_interval_sec);
     cJSON_AddBoolToObject(j, "tx_enabled", _cfg->tx_enabled);
     char _duty_str[8];
     snprintf(_duty_str, sizeof(_duty_str), "%u", (unsigned)_cfg->tx_duty_pct);
@@ -782,8 +795,16 @@ static esp_err_t h_post_config(httpd_req_t *req) {
         _cfg->iaru_region = (uint8_t)region;
     }
 
+    // h_post_config band_enabled partial update.
+    // The original code only wrote entries [0..n-1] from the JSON array,
+    // leaving band_enabled[n..BAND_COUNT-1] at their stale NVS values when
+    // the client sent fewer than BAND_COUNT items.
+    // zero all entries first, then apply only what the client sent.
     cJSON *bands = cJSON_GetObjectItem(j, "band_enabled");
     if (cJSON_IsArray(bands)) {
+        // Reset all entries to false before applying the update so that
+        // a short array from the client cannot leave stale entries enabled.
+        memset(_cfg->band_enabled, 0, sizeof(_cfg->band_enabled));
         int n = cJSON_GetArraySize(bands);
         if (n > BAND_COUNT)
             n = BAND_COUNT;

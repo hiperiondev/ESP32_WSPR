@@ -53,7 +53,7 @@ static const char *TAG = "wspr_main";
 
 // Exact WSPR tone spacing: 12000/8192 Hz = 375/256 Hz = 1464.84375 Hz.
 // Expressed as integer numerator/denominator in milli-Hz * 256 to avoid float.
-// symbol * 375000 / 256 gives milli-Hz offset; max = 3*375000/256 = 4394 mHz.
+// symbol * 375000 / 256 gives mHz offset; max = 3*375000/256 = 4394 mHz.
 // Only 32-bit multiply and divide needed; no 64-bit ops, no float.
 #define WSPR_TONE_NUM 375000UL // tone numerator: spacing_mHz * 256
 #define WSPR_TONE_DEN 256UL    // tone denominator
@@ -243,8 +243,13 @@ static void wspr_transmit(void) {
         esp_task_wdt_reset();
 #endif
 
-        // Exact tone offset: symbol * 375000 / 256 milli-Hz.
-        int32_t tone_offset_millihz = (int32_t)((uint32_t)symbols[i] * WSPR_TONE_NUM / WSPR_TONE_DEN);
+        // Round tone offset to nearest mHz instead of truncating.
+        // Exact WSPR tone offsets (mHz): s=0->0, s=1->1464.844, s=2->2929.688, s=3->4394.531.
+        // Truncation (old): 0, 1464, 2929, 4394 (max error -0.844 mHz).
+        // Rounding (new):   0, 1465, 2930, 4395 -- correct nearest-integer values.
+        // Adding WSPR_TONE_DEN/2 before dividing implements round-half-up.
+        int32_t tone_offset_millihz = (int32_t)(((uint32_t)symbols[i] * WSPR_TONE_NUM + (WSPR_TONE_DEN / 2UL)) / WSPR_TONE_DEN);
+
         oscillator_set_freq_mhz(base_hz, tone_offset_millihz);
 
         uint32_t target_us = (uint32_t)(i + 1) * 682667UL;
@@ -288,6 +293,12 @@ static void wspr_transmit(void) {
     ESP_LOGI(TAG, "TX complete");
 }
 
+// status_task: iaru_region read under cfg mutex to avoid data race.
+// g_cfg.iaru_region is a uint8_t shared with the HTTP task writing via
+// h_post_config.  Although a single-byte read is likely atomic on Xtensa LX6,
+// reading it outside the lock is technically undefined behaviour in C11.
+// Snapshot both region and tx_enabled under a single lock acquisition to keep
+// the critical section short.
 static void status_task(void *arg) {
     char time_str[24] = "---";
     char freq_str[24] = "---";
@@ -317,20 +328,22 @@ static void status_task(void *arg) {
 
         const char *band_name = (g_band_idx >= 0) ? BAND_NAME[g_band_idx] : "---";
 
+        // Snapshot iaru_region and tx_enabled under the cfg mutex.
+        // Reading g_cfg.iaru_region without the lock is a C11 data race because
+        // h_post_config writes it from the HTTP task concurrently.
+        web_server_cfg_lock();
+        uint8_t region_snap = g_cfg.iaru_region;
+        bool tx_en = g_cfg.tx_enabled;
+        web_server_cfg_unlock();
+
         if (g_band_idx >= 0) {
-            uint32_t freq_hz = config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx) + 1500u;
+            uint32_t freq_hz = config_band_freq_hz((iaru_region_t)region_snap, (wspr_band_t)g_band_idx) + 1500u;
             uint32_t mhz_int = freq_hz / 1000000u;
             uint32_t khz_frac = (freq_hz % 1000000u) / 100u;
             snprintf(freq_str, sizeof(freq_str), "%u.%04u MHz", (unsigned)mhz_int, (unsigned)khz_frac);
         }
 
         int32_t next_tx = time_ok ? time_sync_secs_to_next_tx() : -1;
-
-        // Take cfg lock only for the tx_enabled scalar read; all other status
-        // fields are volatile or read-only and do not require the lock.
-        web_server_cfg_lock();
-        bool tx_en = g_cfg.tx_enabled;
-        web_server_cfg_unlock();
 
         web_server_update_status(time_ok, time_str, band_name, freq_str, next_tx, g_tx_active, tx_en, g_symbol_idx);
 
@@ -339,7 +352,7 @@ static void status_task(void *arg) {
 }
 
 static void scheduler_task(void *arg) {
-    ESP_LOGI(TAG, "Scheduler started — waiting for time sync");
+    ESP_LOGI(TAG, "Scheduler started -- waiting for time sync");
 
     // WSPR_TASK_WDT_ENABLE: subscribe this task to the ESP-IDF
     // task watchdog so a hard-hang is detected and triggers a reboot.
@@ -378,7 +391,7 @@ static void scheduler_task(void *arg) {
             continue;
         }
         if (!time_synced_logged) {
-            ESP_LOGI(TAG, "Time synced — entering TX schedule loop");
+            ESP_LOGI(TAG, "Time synced -- entering TX schedule loop");
             time_synced_logged = true;
         }
 
@@ -527,7 +540,7 @@ void app_main(void) {
     // 2. GPIO filter bank
     ESP_ERROR_CHECK(gpio_filter_init());
 
-    // 3. Oscillator — now always returns ESP_OK; sets dummy mode internally if absent
+    // 3. Oscillator -- now always returns ESP_OK; sets dummy mode internally if absent
     ESP_ERROR_CHECK(oscillator_init());
     oscillator_enable(false);
 
