@@ -160,7 +160,7 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 
 ## Features
 
-- ✅ **Full WSPR Type-1 encoder** — callsign packing, convolutional encoding (K=32, rate 1/2), bit-reversal interleaving, sync vector overlay; integer-only arithmetic
+- ✅ **Full WSPR Type-1, 2 and 3 encoder** — callsign packing, convolutional encoding (K=32, rate 1/2), bit-reversal interleaving, sync vector overlay; integer-only arithmetic
 - ✅ **Dual oscillator support** — Si5351A (I2C, auto-detected) and AD9850 (GPIO bit-bang, assumed present); graceful dummy mode if neither found
 - ✅ **12 WSPR bands** — 2200 m through 10 m (137 kHz to 28 MHz)
 - ✅ **IARU Region selection** — Region 1, 2, or 3 for correct 60 m dial frequency
@@ -975,7 +975,7 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 
 | Feature | Status |
 |---|---|
-| WSPR Type-1 encoder (callsign + locator + power) | ✅ Complete |
+| WSPR Type-1, 2 and 3 encoder (callsign + locator + power) | ✅ Complete |
 | Si5351A oscillator driver (I2C, auto-detect) | ✅ Complete |
 | AD9850 DDS oscillator driver (GPIO bit-bang) | ✅ Complete |
 | Oscillator dummy mode (no hardware) | ✅ Complete |
@@ -1009,7 +1009,6 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 
 Planned features and improvements for future releases:
 
-- [ ] **WSPR Type-2 / Type-3 messages** — compound callsigns and 6-character locators
 - [ ] **OTA firmware update** — over-the-air firmware upgrade from the WebUI
 - [ ] **GPS PPS input** — sub-millisecond time accuracy using PPS signal
 - [ ] **Power amplifier enable GPIO** — switch a PA on/off around transmissions
