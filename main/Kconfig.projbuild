@@ -229,4 +229,28 @@ menu "WSPR Transmitter"
             at band transitions. This delay occurs once per transmission, before the
             first WSPR symbol, and does not affect symbol timing accuracy.
 
+    config WSPR_HTTP_AUTH_ENABLE
+        bool "Enable HTTP Basic Authentication for the web interface"
+        default n
+        help
+            When enabled, all HTTP endpoints (/, /api/*) require a valid
+            Authorization: Basic <base64(user:pass)> header. The browser
+            will show its native credential prompt on first access.
+            Credentials are configured in the two options below.
+            Requires mbedtls (always present in ESP-IDF).
+
+    config WSPR_HTTP_AUTH_USER
+        string "HTTP Basic Auth username"
+        default "admin"
+        depends on WSPR_HTTP_AUTH_ENABLE
+        help
+            Username sent in the Authorization header.
+
+    config WSPR_HTTP_AUTH_PASS
+        string "HTTP Basic Auth password"
+        default "wspr"
+        depends on WSPR_HTTP_AUTH_ENABLE
+        help
+            Password sent in the Authorization header.
+
 endmenu

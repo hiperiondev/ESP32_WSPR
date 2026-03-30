@@ -252,12 +252,12 @@ int32_t time_sync_secs_to_next_tx(void) {
     gettimeofday(&tv, NULL);
     time_t now = tv.tv_sec;
 
-    // Slot window is seconds % 120 in [1..5]. Return seconds until the next slot starts.
-    // p==0 -> slot in 1s; p==1..5 -> already in window (0s); p>=6 -> next cycle.
+    // Returning 0 only in [1,3] ensures the scheduler never starts a TX later
+    // than phase=3, giving a 6.4 s margin before the 120 s slot boundary.
     uint32_t p = (uint32_t)(now % 120);
     if (p < 1) {
         return 1;
-    } else if (p <= 5) {
+    } else if (p <= 3) {
         return 0;
     } else {
         return (int32_t)(121 - p);

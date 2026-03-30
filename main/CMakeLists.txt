@@ -18,4 +18,5 @@ idf_component_register(
         json
         esp_timer
         lwip
+        mbedtls
 )

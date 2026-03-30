@@ -276,6 +276,16 @@ static void status_task(void *arg) {
     }
 }
 
+//  all long delays replaced with chunked WDT-safe loops.
+// Root cause of the panic:
+//   - esp_task_wdt_add(NULL) subscribes wspr_sched to the task watchdog.
+//   - The original coarse pre-TX sleep was a single vTaskDelay((wait_sec-2)*1000).
+//     With wait_sec=33, that is a 31 000 ms delay with zero calls to
+//     esp_task_wdt_reset() inside it.  The WDT (default timeout 5 s) fires.
+//   - The same problem exists in the !time_sync_is_ready() loop, the
+//     !tx_enabled_snap loop, the fine-grained phase-check loop, and the
+//     do_skip delay.  All of those paths now reset the WDT before or during
+//     their vTaskDelay calls.
 static void scheduler_task(void *arg) {
     ESP_LOGI(TAG, "Scheduler started — waiting for time sync");
 
@@ -306,6 +316,12 @@ static void scheduler_task(void *arg) {
         // task alive so the web UI, status task and config changes remain
         // responsive even when NTP is unavailable (AP-only mode, no internet).
         if (!time_sync_is_ready()) {
+            // [FIX WDT] feed the task watchdog on every iteration while
+            // waiting for NTP/GPS to sync.  Without this, a long startup
+            // period in AP-only mode (no internet) fires the WDT.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+            esp_task_wdt_reset();
+#endif
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -319,6 +335,11 @@ static void scheduler_task(void *arg) {
         web_server_cfg_unlock();
 
         if (!tx_enabled_snap) {
+            // feed the task watchdog while TX is disabled so an
+            // arbitrarily long TX-off period does not trigger a WDT timeout.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+            esp_task_wdt_reset();
+#endif
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -329,24 +350,37 @@ static void scheduler_task(void *arg) {
         int32_t wait_sec = time_sync_secs_to_next_tx();
         if (wait_sec > 0) {
             ESP_LOGI(TAG, "Next TX in %d s (band=%s)", wait_sec, BAND_NAME[g_band_idx]);
-            // Coarse sleep until ~2 s before TX
-            // cast to uint32_t before multiply so the
-            // arithmetic is unsigned throughout, preventing signed overflow
-            // if wait_sec were ever negative (time_sync_secs_to_next_tx()
-            // guarantees >= 1, but a defensive explicit cast is wise).
+            // chunked loop that feeds the WDT every 1 s instead.
             if (wait_sec > 3) {
                 uint32_t sleep_ms = (uint32_t)(wait_sec - 2) * 1000u;
-                vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+                while (sleep_ms > 0u) {
+                    uint32_t chunk = (sleep_ms > 1000u) ? 1000u : sleep_ms;
+                    vTaskDelay(pdMS_TO_TICKS(chunk));
+                    // reset once per 1 s chunk during coarse pre-TX sleep
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                    esp_task_wdt_reset();
+#endif
+                    sleep_ms -= chunk;
+                }
             }
 
             for (;;) {
                 struct timeval tv;
                 gettimeofday(&tv, NULL);
                 uint32_t phase = (uint32_t)(tv.tv_sec % 120u);
-                if (phase >= 1u && phase <= 5u)
+                // TX starts at phase=3 at the latest: 3 + 110.6 s = 113.6 s,
+                // leaving 6.4 s before the 120 s slot boundary. This prevents
+                // the last symbols from overflowing into the next decode window.
+                // Matches the window in time_sync_secs_to_next_tx().
+                if (phase >= 1u && phase <= 3u)
                     break;
 
                 vTaskDelay(pdMS_TO_TICKS(10));
+                // feed WDT inside fine-grained phase-check loop;
+                // this loop runs for up to ~3 s in 10 ms steps.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                esp_task_wdt_reset();
+#endif
                 web_server_cfg_lock();
                 bool still_en = g_cfg.tx_enabled;
                 web_server_cfg_unlock();
@@ -407,6 +441,11 @@ static void scheduler_task(void *arg) {
         } // close if (!do_skip)
 
         if (do_skip) {
+            // feed WDT before skip delay so that duty-cycle skips
+            // and TX-disabled paths do not accumulate toward a WDT timeout.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+            esp_task_wdt_reset();
+#endif
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }

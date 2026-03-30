@@ -36,6 +36,49 @@
 #include "webui_strings.h"
 #include "wifi_manager.h"
 
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+#include "mbedtls/base64.h"
+
+#define HTTP_AUTH_WARNING
+
+// check_auth: validate Authorization: Basic <b64> header against Kconfig credentials.
+// Returns true when credentials match, false when header is absent or wrong.
+static bool check_auth(httpd_req_t *req) {
+    char auth_hdr[160] = { 0 };
+    // ESP-IDF httpd: returns ESP_OK only when the header value fits in the buffer.
+    if (httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr, sizeof(auth_hdr)) != ESP_OK)
+        return false;
+    // Basic auth header must start with "Basic " (6 chars).
+    if (strncmp(auth_hdr, "Basic ", 6) != 0)
+        return false;
+    // Decode the base64 credential string that follows "Basic ".
+    unsigned char decoded[128] = { 0 };
+    size_t decoded_len = 0;
+    const unsigned char *b64 = (const unsigned char *)(auth_hdr + 6);
+    int rc = mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len, b64, strlen(auth_hdr + 6));
+    if (rc != 0)
+        return false;
+    decoded[decoded_len] = '\0';
+    // Decoded string must be exactly "user:password".
+    char expected[160];
+    snprintf(expected, sizeof(expected), "%s:%s", CONFIG_WSPR_HTTP_AUTH_USER, CONFIG_WSPR_HTTP_AUTH_PASS);
+    return strcmp((char *)decoded, expected) == 0;
+}
+
+// send_auth_challenge: emit HTTP 401 with WWW-Authenticate header so the browser
+// shows its native credential prompt.
+static esp_err_t send_auth_challenge(httpd_req_t *req) {
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"WSPR\"");
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "401 Unauthorized", -1);
+    return ESP_OK;
+}
+
+#else
+#define HTTP_AUTH_WARNING "<p style='text-align:center;color:#92400e;font-size:.78em;margin-bottom:4px'> &#9888; " WEBUI_HTTP_AUTH_WARNING "</p>"
+#endif
+
 static const char *TAG = "web";
 static httpd_handle_t _srv = NULL;
 static wspr_config_t *_cfg = NULL;
@@ -127,11 +170,7 @@ static const char INDEX_HTML[] =
     "cursor:pointer;transition:.2s;display:block;margin:0 auto 20px}"
     ".btn-reset:hover{background:var(--red);color:#fff}"
     "</style></head><body>"
-    "<h1>&#128225; WSPR Transmitter</h1>"
-    "<p style='text-align:center;color:#92400e;font-size:.78em;margin-bottom:4px'>"
-    "&#9888; The configuration interface has no authentication. "
-    "Use on a trusted local network only.</p>"
-    "<div id='reboot_info' class='reboot-info'></div>"
+    "<h1>&#128225; WSPR Transmitter</h1>" HTTP_AUTH_WARNING "<div id='reboot_info' class='reboot-info'></div>"
     "<button class='btn-reset' onclick='resetESP()'>&#9211; Reset ESP32</button>"
     "<div class='grid'>"
 
@@ -545,12 +584,20 @@ static bool validate_locator(const char *s) {
 }
 
 static esp_err_t h_index(httpd_req_t *req) {
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, INDEX_HTML, sizeof(INDEX_HTML) - 1);
     return ESP_OK;
 }
 
 static esp_err_t h_get_config(httpd_req_t *req) {
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
     web_server_cfg_lock();
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "callsign", _cfg->callsign);
@@ -593,6 +640,10 @@ static esp_err_t h_get_config(httpd_req_t *req) {
 }
 
 static esp_err_t h_post_config(httpd_req_t *req) {
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
     char buf[1024] = { 0 };
     int total = req->content_len;
     if (total > (int)(sizeof(buf) - 1))
@@ -740,6 +791,10 @@ static esp_err_t h_post_config(httpd_req_t *req) {
 }
 
 static esp_err_t h_tx_toggle(httpd_req_t *req) {
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
     wspr_config_t cfg_snap;
     web_server_cfg_lock();
     _cfg->tx_enabled = !_cfg->tx_enabled;
@@ -757,6 +812,12 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
 }
 
 static esp_err_t h_status(httpd_req_t *req) {
+    // Auth guard: status endpoint is polled by the UI every 2 s.
+    // Protect it so that unauthenticated clients receive 401, not live data.
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
     wspr_status_t snap = { 0 };
     if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         snap = _status;
@@ -770,7 +831,7 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON_AddStringToObject(j, "time_str", snap.time_str);
     cJSON_AddStringToObject(j, "band", snap.band);
     cJSON_AddStringToObject(j, "freq_str", snap.freq_str);
-    // [FIX #9] Same fix as h_get_config: avoid double FP for integer status fields.
+    // avoid double FP for integer status fields.
     {
         char _ntx_str[16];
         snprintf(_ntx_str, sizeof(_ntx_str), "%ld", (long)snap.next_tx_sec);
@@ -798,6 +859,11 @@ static esp_err_t h_status(httpd_req_t *req) {
 }
 
 static esp_err_t h_wifi_scan(httpd_req_t *req) {
+    // Auth guard: Wi-Fi scan reveals nearby SSIDs; require auth.
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
     char *json = wifi_manager_scan();
     if (!json) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan alloc failed");
@@ -810,6 +876,11 @@ static esp_err_t h_wifi_scan(httpd_req_t *req) {
 }
 
 static esp_err_t h_reset(httpd_req_t *req) {
+    // Auth guard: /api/reset causes esp_restart(); must be protected.
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, "{\"ok\":true}", -1);
     vTaskDelay(pdMS_TO_TICKS(200));

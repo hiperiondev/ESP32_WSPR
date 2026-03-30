@@ -24,6 +24,8 @@
 // HTML lang attribute value
 #define WEBUI_HTML_LANG "en"
 
+#define WEBUI_HTTP_AUTH_WARNING "The configuration interface has no authentication. Use on a trusted local network only."
+
 // Station card
 #define WEBUI_CARD_STATION_TITLE "Station"
 #define WEBUI_LABEL_CALLSIGN     "Callsign"
