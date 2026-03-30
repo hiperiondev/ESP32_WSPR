@@ -1015,7 +1015,7 @@ Planned features and improvements for future releases:
 - [ ] **Power amplifier enable GPIO** — switch a PA on/off around transmissions
 - [ ] **Transmission schedule** — time-of-day or band/day-of-week scheduling rules
 - [ ] **MQTT telemetry** — publish status to an MQTT broker for remote monitoring
-- [ ] **Additional UI languages** — French, German, Portuguese
+- [ ] **Additional UI languages**
 - [ ] **WSPRnet automatic upload** — direct HTTP upload of received spots (requires SDR RX)
 - [ ] **6 m and 4 m band support** — extend frequency table for VHF WSPR
 - [ ] **SPI display support** — optional OLED/TFT status display
