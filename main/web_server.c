@@ -36,7 +36,6 @@
 #include "web_server.h"
 #include "webui_strings.h"
 #include "wifi_manager.h"
-#include "version.h"
 
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
 #include "mbedtls/base64.h"
@@ -173,9 +172,8 @@ static const char INDEX_HTML[] =
     ".btn-reset:hover{background:var(--red);color:#fff}"
     "</style></head><body>"
     "<h1>&#128225; WSPR Transmitter</h1>"
-	"<p style='text-align:center;color:#92400e;font-size:.78em;margin-bottom:4px'> FW Ver: " FW_VERSION_STRING "</p>"
-	HTTP_AUTH_WARNING
-	"<div id='reboot_info' class='reboot-info'></div>"
+    "<p style='text-align:center;color:#92400e;font-size:.78em;margin-bottom:4px'> FW Ver: " FW_VERSION_STRING "</p>" HTTP_AUTH_WARNING
+    "<div id='reboot_info' class='reboot-info'></div>"
     "<button class='btn-reset' onclick='resetESP()'>&#9211; Reset ESP32</button>"
     "<div class='grid'>"
 
@@ -335,7 +333,9 @@ static const char INDEX_HTML[] =
     "body.wifi_pass=document.getElementById('wifi_pass').value;"
     "}"
 
-    "if(!body.callsign||body.callsign.length<3||!/^[A-Z0-9 ]{3,11}$/.test(body.callsign)){"
+    "if(!body.callsign||body.callsign.length<3||body.callsign.length>11||"
+    "!/^[A-Z0-9 /]{3,11}$/.test(body.callsign)||"
+    "(body.callsign.match(/\\//g)||[]).length>1){"
     "toast('\u274c " WEBUI_JS_ERR_CALLSIGN "','err');return;}"
     "if(!body.locator||!/^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$/.test(body.locator)){"
     "toast('\u274c " WEBUI_JS_ERR_LOCATOR "','err');return;}"
@@ -648,12 +648,12 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     // cJSON_AddNumberToObject call internally stores the value as double and
     // triggers libgcc software FP routines, wasting hundreds of cycles and stack.
     // cJSON_AddRawToObject with an snprintf-formatted string is exact and FP-free.
-    {
-        // power_dbm: was cJSON_AddNumberToObject (software double FP)
-        char _pwr_str[8];
-        snprintf(_pwr_str, sizeof(_pwr_str), "%u", (unsigned)_cfg->power_dbm);
-        cJSON_AddRawToObject(j, "power_dbm", _pwr_str);
-    }
+
+    // power_dbm: was cJSON_AddNumberToObject (software double FP)
+    char _pwr_str[8];
+    snprintf(_pwr_str, sizeof(_pwr_str), "%u", (unsigned)_cfg->power_dbm);
+    cJSON_AddRawToObject(j, "power_dbm", _pwr_str);
+
     cJSON_AddStringToObject(j, "wifi_ssid", _cfg->wifi_ssid);
     cJSON_AddBoolToObject(j, "has_pass", _cfg->wifi_pass[0] != '\0');
     cJSON_AddStringToObject(j, "ntp_server", _cfg->ntp_server);
@@ -694,8 +694,15 @@ static esp_err_t h_post_config(httpd_req_t *req) {
 #endif
     char buf[1024] = { 0 };
     int total = req->content_len;
-    if (total > (int)(sizeof(buf) - 1))
-        total = sizeof(buf) - 1;
+    // Reject bodies that would not fit in buf instead of silently
+    // truncating them. A truncated body produces incomplete JSON that cJSON
+    // either rejects outright (JSON parse error) or partially parses, both
+    // of which can cause subtle config corruption when new schema fields are
+    // added in a future CONFIG_SCHEMA_VERSION bump.
+    if (total >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "request body too large");
+        return ESP_OK;
+    }
     {
         int received = 0;
         while (received < total) {
@@ -744,6 +751,14 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     if (v_loc && cJSON_IsString(v_loc)) {
         strncpy(_cfg->locator, v_loc->valuestring, LOCATOR_LEN - 1);
         _cfg->locator[LOCATOR_LEN - 1] = '\0';
+        // Normalize locator to uppercase on the server side.
+        // The JS save() calls .toUpperCase() but a direct API POST (e.g. from
+        // a script or curl) may send lowercase subsquare letters (e.g. "GF05ab").
+        // wspr_encode* internally calls toupper() so encoding is always correct,
+        // but the value stored in NVS and returned by GET /api/config would be
+        // mixed-case without this normalisation, causing cosmetic inconsistency.
+        for (int _i = 0; _cfg->locator[_i] != '\0'; _i++)
+            _cfg->locator[_i] = (char)toupper((unsigned char)_cfg->locator[_i]);
     }
 
     if ((v = cJSON_GetObjectItem(j, "power_dbm")) && cJSON_IsNumber(v)) {

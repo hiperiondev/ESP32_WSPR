@@ -256,4 +256,16 @@ menu "WSPR Transmitter"
         help
             Password sent in the Authorization header.
 
+    config OSCILLATOR_ASSUME_AD9850
+        bool "Assume AD9850 is present when Si5351 is not detected"
+        default y
+        help
+            The AD9850 serial interface is write-only; there is no ACK or readback
+            to confirm the chip is physically present. When this option is enabled
+            (default), oscillator_init() always treats the AD9850 as present if the
+            Si5351 probe fails, identical to the original firmware behaviour.
+            Disable this option to enter DUMMY mode when neither chip responds.
+            Use DUMMY mode on development hardware that has no oscillator fitted,
+            or on Si5351-only boards where the AD9850 footprint is unpopulated.
+
 endmenu

@@ -210,7 +210,7 @@ esp_err_t time_sync_init(const char *ntp_server) {
     uart_param_config(GPS_UART_PORT_NUM, &uart_cfg);
     uart_set_pin(GPS_UART_PORT_NUM, CONFIG_GPS_TX_GPIO, CONFIG_GPS_RX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
-    xTaskCreate(gps_task, "gps", 4096, NULL, 5, &_gps_task);
+    xTaskCreate(gps_task, "gps", 6144, NULL, 5, &_gps_task);
     ESP_LOGI(TAG, "GPS UART started on UART%d RX=%d (TZ forced to UTC)", CONFIG_GPS_UART_PORT, CONFIG_GPS_RX_GPIO);
     return ESP_OK;
 }

@@ -151,6 +151,17 @@ static void wspr_transmit(void) {
     snap_parity = g_cfg.tx_slot_parity;
     web_server_cfg_unlock();
 
+    // Guard against empty callsign or locator before encoding.
+    // wspr_encode_type() returns WSPR_MSG_TYPE_1 for NULL inputs which misleads
+    // the caller into calling wspr_encode() — that call would then fail with
+    // enc_result=-1 and produce a confusing "encode failed" error message.
+    // Catching empty strings here gives a clear log and exits cleanly without
+    // wasting the encode cycle or the TX time slot.
+    if (snap_callsign[0] == '\0' || snap_locator[0] == '\0') {
+        ESP_LOGE(TAG, "TX skipped: callsign or locator is empty");
+        return;
+    }
+
     // Determine WSPR message type and handle Type-2/Type-3 alternation.
     // Type-1: simple callsign + 4-char locator. No alternation needed.
     // Type-2: compound callsign (PREFIX/CALL or CALL/SUFFIX). Must alternate with

@@ -298,7 +298,7 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
         } else {
             ppb_abs = (uint32_t)(-(uint32_t)_ad_cal);
         }
-		
+
         // Rewrite delta_hz using MHz/sub-MHz split to fix two bugs:
         // (1) Precision loss at low WSPR frequencies: the old kHz-truncated formula
         //     gave 13 Hz instead of 13.76 Hz at 137600 Hz -- a 0.76 Hz error that
@@ -364,6 +364,16 @@ static void ad9850_write_word(uint32_t freq_word, uint8_t phase) {
 }
 
 static bool ad9850_try_init(void) {
+    // When CONFIG_OSCILLATOR_ASSUME_AD9850 is disabled this function
+    // returns false immediately so oscillator_init() falls through to dummy mode.
+    // This allows the firmware to operate without physical AD9850 hardware (e.g.
+    // development builds that use only the Si5351, or hardware variants without
+    // any oscillator fitted). Enable CONFIG_OSCILLATOR_ASSUME_AD9850 in menuconfig
+    // to restore the original "always assumed present" behaviour.
+#if !CONFIG_OSCILLATOR_ASSUME_AD9850
+    ESP_LOGW(TAG, "AD9850 assumption disabled in Kconfig -- skipping AD9850 init, entering DUMMY mode");
+    return false;
+#else
     gpio_config_t io_conf = {
         .pin_bit_mask = BIT64(AD9850_CLK_GPIO) | BIT64(AD9850_FQUD_GPIO) | BIT64(AD9850_DATA_GPIO) | BIT64(AD9850_RESET_GPIO),
         .mode = GPIO_MODE_OUTPUT,
@@ -381,6 +391,7 @@ static bool ad9850_try_init(void) {
 
     ESP_LOGI(TAG, "AD9850 initialized (ref=%d Hz) — presence assumed (write-only)", AD9850_REF_CLK);
     return true;
+#endif
 }
 
 // =============================================================================
