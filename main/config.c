@@ -195,6 +195,13 @@ esp_err_t config_load(wspr_config_t *cfg) {
     if (cfg->hop_interval_sec < 120u)
         cfg->hop_interval_sec = 120u;
 
+    // bands_changed is a runtime coordination flag between the
+    // HTTP handler and the scheduler task. It has no meaningful state across
+    // power cycles. Clearing it here prevents an unnecessary band-list rebuild
+    // on the first scheduler iteration after every cold boot following a
+    // config save (h_post_config always sets it true before config_save()).
+    cfg->bands_changed = false;
+
     ESP_LOGI(TAG, "Config loaded: cs=%s loc=%s pwr=%d dBm cal=%ld ppb region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb,
              (int)cfg->iaru_region);
     return err;

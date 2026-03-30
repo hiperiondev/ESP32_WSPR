@@ -234,9 +234,36 @@ static int32_t _ad_cal = 0;
 
 static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
 
-#define AD9850_SCALE_KHZ (4294967UL / ((uint32_t)AD9850_REF_CLK / 1000000UL))
+// True FTW formula: FTW = freq_hz * 2^32 / ref_clk
+// For ref_clk = 125 MHz: FTW/Hz = 4294967296 / 125000000 = 34.359738...
+//
+// These three compile-time constants decompose the multiplier exactly with no
+// 64-bit arithmetic at runtime (64-bit is used only during compilation):
+//   FTW_PER_MHZ    = floor(2^32 / (ref_clk_hz / 1e6))  -- exact for common refs
+//   FTW_INT_PER_HZ = floor(2^32 / ref_clk_hz)          -- integer part per Hz
+//   FTW_FRAC_NUM   = round((fractional part) * FTW_FRAC_DEN)
+//   FTW_FRAC_DEN   = 10000
+//
+// For 125 MHz: FTW_PER_MHZ=34359738, FTW_INT_PER_HZ=34, FTW_FRAC_NUM=3597
+// Accuracy: max error < 1 Hz at 28 MHz with pure 32-bit arithmetic.
+#define AD9850_FTW_PER_MHZ    ((uint32_t)(4294967296ULL / ((uint32_t)AD9850_REF_CLK / 1000000UL)))
+#define AD9850_FTW_INT_PER_HZ ((uint32_t)(4294967296ULL / (uint32_t)AD9850_REF_CLK))
+#define AD9850_FTW_FRAC_DEN   10000UL
+#define AD9850_FTW_FRAC_NUM                                                                                                                                    \
+    ((uint32_t)((4294967296ULL - (uint64_t)AD9850_FTW_INT_PER_HZ * (uint32_t)AD9850_REF_CLK) * AD9850_FTW_FRAC_DEN / (uint32_t)AD9850_REF_CLK))
 
-static_assert((28200UL * (4294967UL / ((uint32_t)AD9850_REF_CLK / 1000000UL))) < 0xFFFFFFFFUL,
+// Combined per-mHz scale factor used in oscillator_set_freq_mhz.
+// frac_mhz is in milli-Hz (0..4395 for WSPR).
+// FTW increment per mHz = (FTW_INT_PER_HZ * FTW_FRAC_DEN + FTW_FRAC_NUM) / (1000 * FTW_FRAC_DEN)
+// For 125 MHz: (34*10000 + 3597) / 10000000 = 343597 / 10000000
+// At max 4395 mHz: 4395*343597/10000000 = 151 FTW (exact, no overflow: 4395*343597 < 2^32).
+#define AD9850_FTW_FRAC_PER_MHZ_NUM ((uint32_t)(AD9850_FTW_INT_PER_HZ * AD9850_FTW_FRAC_DEN + AD9850_FTW_FRAC_NUM))
+#define AD9850_FTW_FRAC_PER_MHZ_DEN (1000UL * AD9850_FTW_FRAC_DEN)
+
+// verifies the new MHz-split formula does not overflow uint32_t at the
+// maximum WSPR frequency (30 MHz used as a conservative ceiling).
+static_assert((30UL * (4294967296ULL / ((uint32_t)AD9850_REF_CLK / 1000000UL)) + 999999UL * (4294967296ULL / (uint32_t)AD9850_REF_CLK) +
+               999999UL * AD9850_FTW_FRAC_NUM / AD9850_FTW_FRAC_DEN) < 0xFFFFFFFFUL,
               "AD9850 FTW overflow: max WSPR frequency word must fit in 32 bits for the configured ref clock");
 
 static uint32_t ad9850_freq_word(uint32_t freq_hz) {
@@ -256,10 +283,22 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
             freq_hz = freq_hz + delta_hz;
         }
     }
-    uint32_t freq_khz = freq_hz / 1000UL;
-    uint32_t freq_rem = freq_hz % 1000UL;
-    uint32_t fw = freq_khz * AD9850_SCALE_KHZ;
-    fw += (freq_rem * AD9850_SCALE_KHZ) / 1000UL;
+
+    // MHz-split FTW computation -- 32-bit only, max error < 1 Hz at 28 MHz.
+    // Split frequency into MHz and sub-MHz Hz parts to avoid truncation error
+    // inherent in any kHz-scale constant.
+    uint32_t freq_mhz = freq_hz / 1000000UL;    // integer MHz  (0..30)
+    uint32_t freq_sub_hz = freq_hz % 1000000UL; // sub-MHz Hz remainder (0..999999)
+
+    // Term 1: MHz-aligned FTW. Max: 30 * 34359738 = 1030792140 < 2^32. OK.
+    uint32_t fw = freq_mhz * AD9850_FTW_PER_MHZ;
+
+    // Term 2: integer part of FTW per sub-MHz Hz. Max: 999999 * 34 = 33999966. OK.
+    fw += freq_sub_hz * AD9850_FTW_INT_PER_HZ;
+
+    // Term 3: fractional correction. Max: 999999 * 3597 / 10000 = 359696. OK.
+    fw += (freq_sub_hz * AD9850_FTW_FRAC_NUM) / AD9850_FTW_FRAC_DEN;
+
     return fw;
 }
 
@@ -358,7 +397,11 @@ esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_mhz) {
         _ad_last_hz = out_hz;
         _ad_last_frac = frac_mhz;
         uint32_t fw = ad9850_freq_word(out_hz);
-        fw += (frac_mhz * AD9850_SCALE_KHZ) / 1000000UL;
+        // combined mHz formula for sub-Hz accuracy.
+        // frac_mhz is in milli-Hz (0..4395 for WSPR: 3 symbols * 1464.84375 mHz).
+        // FTW per mHz = (FTW_INT_PER_HZ*FTW_FRAC_DEN + FTW_FRAC_NUM) / (1000*FTW_FRAC_DEN)
+        // Intermediate max: 4395 * 343597 = 1,510,008,615 < 2^32. No overflow.
+        fw += (frac_mhz * AD9850_FTW_FRAC_PER_MHZ_NUM) / AD9850_FTW_FRAC_PER_MHZ_DEN;
         ad9850_write_word(fw, 0u);
     }
     return ESP_OK;
@@ -373,7 +416,8 @@ esp_err_t oscillator_enable(bool en) {
         if (en) {
             if (_ad_last_hz > 0u) {
                 uint32_t fw = ad9850_freq_word(_ad_last_hz);
-                fw += (_ad_last_frac * AD9850_SCALE_KHZ) / 1000000UL;
+                // Same mHz formula as in oscillator_set_freq_mhz.
+                fw += (_ad_last_frac * AD9850_FTW_FRAC_PER_MHZ_NUM) / AD9850_FTW_FRAC_PER_MHZ_DEN;
                 ad9850_write_word(fw, 0x00u);
             }
         } else {
