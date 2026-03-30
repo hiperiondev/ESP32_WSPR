@@ -130,7 +130,10 @@ static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
     if (_si_cal != 0) {
         int32_t vco_mhz = (int32_t)(_si_vco / 1000000UL);
         int32_t correction_hz = (vco_mhz * _si_cal) / 1000;
-        vco_cal = (uint32_t)((int32_t)_si_vco - correction_hz);
+        // add correction because fast crystal raises f_VCO_actual;
+        // vco_cal must equal f_VCO_actual so divider d = vco_cal / f_target yields
+        // f_out = f_VCO_actual / d = f_target exactly. Subtracting made error worse.
+        vco_cal = (uint32_t)((int32_t)_si_vco + correction_hz);
     }
     uint32_t d_int = vco_cal / eff_hz;
     if (d_int < 6UL || d_int > 1800UL) {
@@ -245,10 +248,12 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
             ppb_abs = (uint32_t)(-(uint32_t)_ad_cal);
         }
         uint32_t delta_hz = (freq_hz / 1000u) * ppb_abs / 1000000u;
+        // positive ppb means ref runs fast -> output too high -> reduce requested freq.
+        // Negative ppb means ref runs slow -> output too low -> increase requested freq.
         if (_ad_cal > 0) {
-            freq_hz = freq_hz + delta_hz;
-        } else {
             freq_hz = (freq_hz > delta_hz) ? (freq_hz - delta_hz) : 0u;
+        } else {
+            freq_hz = freq_hz + delta_hz;
         }
     }
     uint32_t freq_khz = freq_hz / 1000UL;
