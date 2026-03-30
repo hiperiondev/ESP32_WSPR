@@ -35,6 +35,7 @@
 #include "web_server.h"
 #include "webui_strings.h"
 #include "wifi_manager.h"
+#include "version.h"
 
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
 #include "mbedtls/base64.h"

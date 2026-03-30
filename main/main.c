@@ -137,6 +137,20 @@ static void wspr_transmit(void) {
     uint8_t symbols[WSPR_SYMBOLS];
     int enc_result;
 
+    // Snapshot all required config fields under a single lock to eliminate
+    // the TOCTOU race: an HTTP POST /api/config could partially overwrite g_cfg between
+    // the first cfg_unlock and the wspr_encode() call in the original two-lock design.
+    char snap_callsign[CALLSIGN_LEN];
+    char snap_locator[LOCATOR_LEN];
+    uint8_t snap_power;
+    uint8_t snap_parity;
+    web_server_cfg_lock();
+    memcpy(snap_callsign, g_cfg.callsign, CALLSIGN_LEN);
+    memcpy(snap_locator, g_cfg.locator, LOCATOR_LEN);
+    snap_power = g_cfg.power_dbm;
+    snap_parity = g_cfg.tx_slot_parity;
+    web_server_cfg_unlock();
+
     // Determine WSPR message type and handle Type-2/Type-3 alternation.
     // Type-1: simple callsign + 4-char locator. No alternation needed.
     // Type-2: compound callsign (PREFIX/CALL or CALL/SUFFIX). Must alternate with
@@ -145,36 +159,32 @@ static void wspr_transmit(void) {
     // Type-3: simple callsign + 6-char locator. Must alternate Type-1 (primary) with
     //         Type-3 (companion) to transmit the sub-square precision locator.
     // tx_slot_parity: 0 = primary slot, 1 = companion Type-3 slot.
-
-    web_server_cfg_lock();
-    wspr_msg_type_t msg_type = wspr_encode_type(g_cfg.callsign, g_cfg.locator);
-    uint8_t parity = g_cfg.tx_slot_parity;
-    web_server_cfg_unlock();
+    wspr_msg_type_t msg_type = wspr_encode_type(snap_callsign, snap_locator);
 
     if (msg_type == WSPR_MSG_TYPE_1) {
         // Standard Type-1: encode normally; no alternation.
-        enc_result = wspr_encode(g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm, symbols);
+        enc_result = wspr_encode(snap_callsign, snap_locator, snap_power, symbols);
     } else {
         // Type-2 or Type-1+Type-3 path: alternate primary / companion slots.
-        if (parity == 0) {
+        if (snap_parity == 0) {
             // Even slot: transmit primary message.
             // For compound callsign: wspr_encode() produces Type-2 automatically.
             // For 6-char locator: wspr_encode() produces Type-1 using the first 4 chars.
-            enc_result = wspr_encode(g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm, symbols);
+            enc_result = wspr_encode(snap_callsign, snap_locator, snap_power, symbols);
         } else {
             // Odd slot: transmit companion Type-3 message.
             // wspr_encode_type3() requires exactly 6-char locator.
             // If the stored locator is only 4 chars, append "aa" (centre of square).
             char loc6[7];
-            size_t loc_len = strlen(g_cfg.locator);
+            size_t loc_len = strlen(snap_locator);
             if (loc_len >= 6) {
-                strncpy(loc6, g_cfg.locator, 6);
+                memcpy(loc6, snap_locator, 6);
                 loc6[6] = '\0';
             } else {
                 // 4-char locator: pad with "aa" subsquare (centre of grid square).
-                snprintf(loc6, sizeof(loc6), "%.4saa", g_cfg.locator);
+                snprintf(loc6, sizeof(loc6), "%.4saa", snap_locator);
             }
-            enc_result = wspr_encode_type3(g_cfg.callsign, loc6, g_cfg.power_dbm, symbols);
+            enc_result = wspr_encode_type3(snap_callsign, loc6, snap_power, symbols);
         }
         // Advance parity after every attempted alternating TX.
         // This ensures the companion slot fires on the very next scheduler cycle
@@ -192,7 +202,7 @@ static void wspr_transmit(void) {
                  "simple callsign: 1-6 chars with digit at pos 2 (e.g. LU3VEA, W1AW, G4JNT); "
                  "compound callsign: PREFIX/CALL or CALL/SUFFIX (e.g. PJ4/K1ABC, K1ABC/P); "
                  "locator: 4 chars (AA00, e.g. GF05) or 6 chars (AA00AA, e.g. GF05aa)",
-                 g_cfg.callsign, g_cfg.locator);
+                 snap_callsign, snap_locator);
         return;
     }
 
@@ -219,7 +229,7 @@ static void wspr_transmit(void) {
     // stack is 8 KiB; this value confirms how much headroom remains at TX entry.
     // Also log message type and slot parity for Type-2/3 diagnosis.
     ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
-             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)parity,
+             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)snap_parity,
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {

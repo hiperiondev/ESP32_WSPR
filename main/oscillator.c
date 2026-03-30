@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -143,20 +144,27 @@ static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
         return ESP_ERR_INVALID_ARG;
     }
     uint32_t remainder = vco_cal - d_int * eff_hz;
-    uint32_t c_den = 10000UL;
+    // Use maximum 20-bit c_den for ~0.2 mHz/step resolution and incorporate
+    // eff_mhz into the fractional divider to eliminate the 0-464 mHz per-tone error
+    // on WSPR HF bands. Without this fix eff_mhz was computed but never used.
+    // 64-bit is used only in this frequency-setup routine (~1 Hz call rate, not hot path).
+    uint32_t c_den = 1048575UL; // maximum 20-bit value per Si5351 AN619
     uint32_t d_num;
     {
-        uint32_t r = remainder;
-        uint32_t e = eff_hz;
-        uint8_t shift = 0;
-        while (r > 429496UL && shift < 12) {
-            r >>= 1;
-            e >>= 1;
-            shift++;
+        // rem_mhz = remainder*1000 - d_int*eff_mhz  [milli-Hz domain]
+        // Always >= 0: remainder < eff_hz so d_int*eff_mhz/1000 < d_int <= remainder/... OK.
+        uint64_t rem_mhz = (uint64_t)remainder * 1000UL;
+        if (eff_mhz != 0u) {
+            uint64_t sub = (uint64_t)d_int * (uint64_t)eff_mhz;
+            if (sub <= rem_mhz) {
+                rem_mhz -= sub;
+            } else {
+                rem_mhz = 0ULL; // guard against rounding edge cases
+            }
         }
-        if (e == 0u)
-            e = 1u;
-        d_num = (r * c_den) / e;
+        uint64_t den_mhz = (uint64_t)eff_hz * 1000UL;
+        // rem_mhz < den_mhz guarantees d_num < c_den; max(rem_mhz*c_den) ~3e16 < 2^63.
+        d_num = (uint32_t)((rem_mhz * (uint64_t)c_den) / den_mhz);
     }
     uint32_t p1 = 128UL * d_int + (128UL * d_num / c_den) - 512UL;
     uint32_t p2 = 128UL * d_num - c_den * (128UL * d_num / c_den);
