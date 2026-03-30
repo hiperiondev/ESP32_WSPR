@@ -179,7 +179,7 @@ static const char INDEX_HTML[] =
     "<label>" WEBUI_LABEL_CALLSIGN "</label>"
     "<input id='callsign' type='text' maxlength='11' placeholder='LU1ABC'>"
     "<label>" WEBUI_LABEL_LOCATOR "</label>"
-    "<input id='locator' type='text' maxlength='4' placeholder='GF05'>"
+    "<input id='locator' type='text' maxlength='6' placeholder='GF05'>"
     "<label>" WEBUI_LABEL_POWER "</label>"
     "<input id='power' type='number' min='0' max='60' step='3'>"
     "<label>" WEBUI_LABEL_XTAL_CAL "</label>"
@@ -550,25 +550,37 @@ void web_server_cfg_unlock(void) {
     }
 }
 
+// validate_callsign: now allows '/' for compound callsigns (Type-2).
+// Compound form: PREFIX/CALL (e.g. PJ4/K1ABC) or CALL/SUFFIX (e.g. K1ABC/P).
+// At most one slash is permitted; wspr_encode() routes compound callsigns to
+// Type-2 encoding which handles the slash correctly.
 static bool validate_callsign(const char *s) {
     int len = (int)strlen(s);
-    // Mminimum length is 3 (e.g. "N0X"), maximum is CALLSIGN_LEN-1.
-    // '/' was removed from the allowed set: wspr_encode pack_callsign() uses
-    // char_to_wspr() which maps only 0-9, A-Z, and space (returning -1 for '/'),
-    // so accepting '/' here would pass server validation but fail encoding.
+    // Minimum length is 3 (e.g. "N0X"), maximum is CALLSIGN_LEN-1.
     if (len < 3 || len > CALLSIGN_LEN - 1)
         return false;
+    int slash_count = 0;
     for (int i = 0; i < len; i++) {
         char c = (char)toupper((unsigned char)s[i]);
-        // Only alphanumeric and space are valid WSPR callsign characters
-        if (!isalnum((unsigned char)c) && c != ' ')
+        // Allow '/' in addition to alphanumeric and space.
+        if (!isalnum((unsigned char)c) && c != ' ' && c != '/')
             return false;
+        if (c == '/')
+            slash_count++;
     }
+    // At most one slash allowed (PREFIX/CALL/SUFFIX form is not valid WSPR).
+    if (slash_count > 1)
+        return false;
     return true;
 }
 
+// validate_locator: accepts 4-char (DDLL) or 6-char (DDLLSS) Maidenhead locators.
+// 4-char locators produce standard Type-1 transmissions.
+// 6-char locators enable Type-3 companion transmissions for sub-square precision.
 static bool validate_locator(const char *s) {
-    if (strlen(s) != 4)
+    size_t len = strlen(s);
+    // Accept exactly 4 or exactly 6 characters.
+    if (len != 4 && len != 6)
         return false;
     char c0 = (char)toupper((unsigned char)s[0]);
     char c1 = (char)toupper((unsigned char)s[1]);
@@ -580,6 +592,15 @@ static bool validate_locator(const char *s) {
         return false;
     if (!isdigit((unsigned char)s[3]))
         return false;
+    // Validate subsquare letters for 6-char locator (A..X each).
+    if (len == 6) {
+        char c4 = (char)toupper((unsigned char)s[4]);
+        char c5 = (char)toupper((unsigned char)s[5]);
+        if (c4 < 'A' || c4 > 'X')
+            return false;
+        if (c5 < 'A' || c5 > 'X')
+            return false;
+    }
     return true;
 }
 
@@ -680,7 +701,7 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     if (v_loc && cJSON_IsString(v_loc) && !validate_locator(v_loc->valuestring)) {
         cJSON_Delete(j);
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_send(req, "{\"ok\":false,\"err\":\"Invalid locator (4-char Maidenhead required)\"}", -1);
+        httpd_resp_send(req, "{\"ok\":false,\"err\":\"Invalid locator (4 or 6-char Maidenhead required)\"}", -1);
         return ESP_OK;
     }
 

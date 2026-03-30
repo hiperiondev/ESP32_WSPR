@@ -29,7 +29,7 @@
 // Station card
 #define WEBUI_CARD_STATION_TITLE "Estaci&#243;n"
 #define WEBUI_LABEL_CALLSIGN     "Indicativo"
-#define WEBUI_LABEL_LOCATOR      "Localizador Maidenhead (4 car.)"
+#define WEBUI_LABEL_LOCATOR      "Localizador Maidenhead (4 o 6 car.)" // 6 car. para precision Type-3
 #define WEBUI_LABEL_POWER        "Potencia TX (dBm)"
 #define WEBUI_LABEL_XTAL_CAL     "Calibraci&#243;n XTAL (ppb)"
 #define WEBUI_HINT_XTAL_CAL      "Compensaci&#243;n del cristal en ppb. 0&#61;sin correcci&#243;n."

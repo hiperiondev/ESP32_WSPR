@@ -109,7 +109,9 @@ const uint8_t BAND_FILTER[BAND_COUNT] = {
 };
 
 static_assert(sizeof(CONFIG_WSPR_DEFAULT_CALLSIGN) <= CALLSIGN_LEN, "Default callsign too long for CALLSIGN_LEN");
-static_assert(sizeof(CONFIG_WSPR_DEFAULT_LOCATOR) == 5, "Default locator must be exactly 4 characters (DDLL format)");
+// Accept 4-char (DDLL) or 6-char (DDLLSS) default locator.
+static_assert(sizeof(CONFIG_WSPR_DEFAULT_LOCATOR) == 5 || sizeof(CONFIG_WSPR_DEFAULT_LOCATOR) == 7,
+              "Default locator must be 4 characters (DDLL) or 6 characters (DDLLSS)");
 
 void config_defaults(wspr_config_t *cfg) {
     memset(cfg, 0, sizeof(*cfg));
@@ -127,6 +129,8 @@ void config_defaults(wspr_config_t *cfg) {
     cfg->xtal_cal_ppb = 0;
     cfg->iaru_region = (uint8_t)IARU_REGION_1;
     cfg->bands_changed = false;
+    // Always start from even slot (primary message) after defaults.
+    cfg->tx_slot_parity = 0;
 }
 
 esp_err_t config_init(void) {
@@ -201,6 +205,8 @@ esp_err_t config_load(wspr_config_t *cfg) {
     // on the first scheduler iteration after every cold boot following a
     // config save (h_post_config always sets it true before config_save()).
     cfg->bands_changed = false;
+    // tx_slot_parity is runtime-only; always clear after cold boot.
+    cfg->tx_slot_parity = 0;
 
     ESP_LOGI(TAG, "Config loaded: cs=%s loc=%s pwr=%d dBm cal=%ld ppb region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb,
              (int)cfg->iaru_region);

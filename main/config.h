@@ -31,7 +31,7 @@
 // Schema version
 // ---------------------------------------------------------------------------
 
-#define CONFIG_SCHEMA_VERSION 4u
+#define CONFIG_SCHEMA_VERSION 5u
 
 // ---------------------------------------------------------------------------
 // String field size constants
@@ -106,6 +106,10 @@ typedef struct {
     int32_t xtal_cal_ppb;
     uint8_t iaru_region;
     bool bands_changed; // set true by web save when band_enabled or hop_enabled changes; cleared after rebuild
+    // Tracks even/odd TX slot for Type-2/3 alternation.
+    // 0 = transmit primary (Type-1 or Type-2), 1 = transmit companion (Type-3).
+    // Cleared to 0 on every cold boot; runtime-only, not meaningful across power cycles.
+    uint8_t tx_slot_parity;
 } wspr_config_t;
 
 // ---------------------------------------------------------------------------

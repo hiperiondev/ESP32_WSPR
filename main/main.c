@@ -135,13 +135,63 @@ static void select_next_band(bool force_next) {
 
 static void wspr_transmit(void) {
     uint8_t symbols[WSPR_SYMBOLS];
+    int enc_result;
 
-    if (wspr_encode(g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm, symbols) < 0) {
+    // Determine WSPR message type and handle Type-2/Type-3 alternation.
+    // Type-1: simple callsign + 4-char locator. No alternation needed.
+    // Type-2: compound callsign (PREFIX/CALL or CALL/SUFFIX). Must alternate with
+    //         a companion Type-3 message on consecutive even-minute TX slots so that
+    //         receiving stations can decode both the compound callsign and the locator.
+    // Type-3: simple callsign + 6-char locator. Must alternate Type-1 (primary) with
+    //         Type-3 (companion) to transmit the sub-square precision locator.
+    // tx_slot_parity: 0 = primary slot, 1 = companion Type-3 slot.
+
+    web_server_cfg_lock();
+    wspr_msg_type_t msg_type = wspr_encode_type(g_cfg.callsign, g_cfg.locator);
+    uint8_t parity = g_cfg.tx_slot_parity;
+    web_server_cfg_unlock();
+
+    if (msg_type == WSPR_MSG_TYPE_1) {
+        // Standard Type-1: encode normally; no alternation.
+        enc_result = wspr_encode(g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm, symbols);
+    } else {
+        // Type-2 or Type-1+Type-3 path: alternate primary / companion slots.
+        if (parity == 0) {
+            // Even slot: transmit primary message.
+            // For compound callsign: wspr_encode() produces Type-2 automatically.
+            // For 6-char locator: wspr_encode() produces Type-1 using the first 4 chars.
+            enc_result = wspr_encode(g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm, symbols);
+        } else {
+            // Odd slot: transmit companion Type-3 message.
+            // wspr_encode_type3() requires exactly 6-char locator.
+            // If the stored locator is only 4 chars, append "aa" (centre of square).
+            char loc6[7];
+            size_t loc_len = strlen(g_cfg.locator);
+            if (loc_len >= 6) {
+                strncpy(loc6, g_cfg.locator, 6);
+                loc6[6] = '\0';
+            } else {
+                // 4-char locator: pad with "aa" subsquare (centre of grid square).
+                snprintf(loc6, sizeof(loc6), "%.4saa", g_cfg.locator);
+            }
+            enc_result = wspr_encode_type3(g_cfg.callsign, loc6, g_cfg.power_dbm, symbols);
+        }
+        // Advance parity after every attempted alternating TX.
+        // This ensures the companion slot fires on the very next scheduler cycle
+        // regardless of whether the current encode succeeded or the TX was skipped.
+        web_server_cfg_lock();
+        g_cfg.tx_slot_parity ^= 1u;
+        web_server_cfg_unlock();
+    }
+
+    if (enc_result < 0) {
+        // Updated error message: locator now accepts 4 or 6 chars;
+        // callsign now accepts compound form (PREFIX/CALL or CALL/SUFFIX).
         ESP_LOGE(TAG,
                  "WSPR encode failed: cs='%s' loc='%s' -- "
-                 "callsign must be 1-6 chars with digit at pos 2 after normalization "
-                 "(e.g. LU3VEA, VK2ABC, W1AW, G4JNT); "
-                 "locator must be exactly 4 chars (AA00 format, e.g. FF61, GF05)",
+                 "simple callsign: 1-6 chars with digit at pos 2 (e.g. LU3VEA, W1AW, G4JNT); "
+                 "compound callsign: PREFIX/CALL or CALL/SUFFIX (e.g. PJ4/K1ABC, K1ABC/P); "
+                 "locator: 4 chars (AA00, e.g. GF05) or 6 chars (AA00AA, e.g. GF05aa)",
                  g_cfg.callsign, g_cfg.locator);
         return;
     }
@@ -149,7 +199,7 @@ static void wspr_transmit(void) {
     // base_hz computed before the filter switch; oscillator_set_freq()
     // pre-programs the correct band frequency with RF output still off so
     // the relay never routes a stale previous-band signal through the new
-    // filter passband.  vTaskDelay(10 ms) after gpio_filter_select() lets
+    // filter passband.  vTaskDelay after gpio_filter_select() lets
     // relay contacts settle before the oscillator output is enabled.
     uint32_t base_hz = config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx) + 1500u;
     oscillator_set_freq(base_hz);
@@ -167,8 +217,10 @@ static void wspr_transmit(void) {
     // log stack high-watermark at TX start to help diagnose
     // stack overflows during the ~110 s transmission window.  The scheduler_task
     // stack is 8 KiB; this value confirms how much headroom remains at TX entry.
-    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz stack HWM=%u bytes", BAND_NAME[g_band_idx],
-             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    // Also log message type and slot parity for Type-2/3 diagnosis.
+    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
+             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)parity,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;
@@ -276,16 +328,6 @@ static void status_task(void *arg) {
     }
 }
 
-//  all long delays replaced with chunked WDT-safe loops.
-// Root cause of the panic:
-//   - esp_task_wdt_add(NULL) subscribes wspr_sched to the task watchdog.
-//   - The original coarse pre-TX sleep was a single vTaskDelay((wait_sec-2)*1000).
-//     With wait_sec=33, that is a 31 000 ms delay with zero calls to
-//     esp_task_wdt_reset() inside it.  The WDT (default timeout 5 s) fires.
-//   - The same problem exists in the !time_sync_is_ready() loop, the
-//     !tx_enabled_snap loop, the fine-grained phase-check loop, and the
-//     do_skip delay.  All of those paths now reset the WDT before or during
-//     their vTaskDelay calls.
 static void scheduler_task(void *arg) {
     ESP_LOGI(TAG, "Scheduler started — waiting for time sync");
 
@@ -316,7 +358,7 @@ static void scheduler_task(void *arg) {
         // task alive so the web UI, status task and config changes remain
         // responsive even when NTP is unavailable (AP-only mode, no internet).
         if (!time_sync_is_ready()) {
-            // [FIX WDT] feed the task watchdog on every iteration while
+            // Feed the task watchdog on every iteration while
             // waiting for NTP/GPS to sync.  Without this, a long startup
             // period in AP-only mode (no internet) fires the WDT.
 #if CONFIG_WSPR_TASK_WDT_ENABLE

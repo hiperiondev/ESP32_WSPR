@@ -29,7 +29,7 @@
 // Station card
 #define WEBUI_CARD_STATION_TITLE "Station"
 #define WEBUI_LABEL_CALLSIGN     "Callsign"
-#define WEBUI_LABEL_LOCATOR      "Maidenhead Locator (4 char.)"
+#define WEBUI_LABEL_LOCATOR      "Maidenhead Locator (4 or 6 char.)"
 #define WEBUI_LABEL_POWER        "TX Power (dBm)"
 #define WEBUI_LABEL_XTAL_CAL     "XTAL Calibration (ppb)"
 #define WEBUI_HINT_XTAL_CAL      "Crystal offset in ppb. 0=no correction."

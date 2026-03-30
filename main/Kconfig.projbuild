@@ -7,10 +7,13 @@ menu "WSPR Transmitter"
             WSPR callsign used when no saved configuration exists in NVS.
 
     config WSPR_DEFAULT_LOCATOR
-        string "Default Maidenhead locator (4 chars)"
+        string "Default Maidenhead locator (4 or 6 chars)"
         default "AA00"
         help
-            4-character Maidenhead grid square used when no saved config exists.
+            4-character Maidenhead grid square (DDLL, e.g. GF05) or 6-character
+            sub-square (DDLLSS, e.g. GF05aa) used when no saved config exists.
+            A 6-character locator enables alternating Type-1 + Type-3 transmissions
+            for sub-square precision.
 
     config WSPR_DEFAULT_POWER_DBM
         int "Default TX power (dBm)"
