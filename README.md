@@ -175,7 +175,7 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 - ✅ **NVS persistent config** — all settings survive power cycles; schema version check with automatic defaults on mismatch
 - ✅ **Multilingual UI** — English and Spanish (compile-time selection via Kconfig)
 - ✅ **WSPRnet integration** — direct link from the WebUI to your station's spot map
-- ✅ **ESP-IDF native** — no Arduino dependency; uses FreeRTOS, esp_wifi, esp_sntp, esp_http_server, nvs_flash, driver/i2c, driver/gpio, driver/uart
+- ✅ **ESP-IDF native** — no Arduino dependency
 
 <div align="right">
   <a href="#readme-top">
@@ -1009,6 +1009,7 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 
 Planned features and improvements for future releases:
 
+- [ ] **RTC DS3231** — for non connected fail mode
 - [ ] **OTA firmware update** — over-the-air firmware upgrade from the WebUI
 - [ ] **GPS PPS input** — sub-millisecond time accuracy using PPS signal
 - [ ] **Power amplifier enable GPIO** — switch a PA on/off around transmissions
