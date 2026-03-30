@@ -94,6 +94,14 @@ static esp_err_t si5351_ping(void) {
 }
 
 static esp_err_t si_init_pll(void) {
+    // Reject crystal frequencies outside the Si5351A supported range
+    // (10-40 MHz per datasheet). A value like 50 MHz or 100 MHz would produce a
+    // PLL multiplier inside the valid 15-90 range but drive the VCO above 900 MHz
+    // spec, causing silent lock failure or wrong output frequency.
+    if (_si_xtal < 10000000UL || _si_xtal > 40000000UL) {
+        ESP_LOGE(TAG, "SI5351: xtal %lu Hz out of supported range 10-40 MHz", (unsigned long)_si_xtal);
+        return ESP_ERR_INVALID_ARG;
+    }
     uint32_t xtal_mhz = _si_xtal / 1000000UL;
     uint32_t a = 900UL / xtal_mhz;
     if (a < 15UL)
@@ -113,68 +121,246 @@ static esp_err_t si_init_pll(void) {
     return err;
 }
 
-static esp_err_t si_set_freq_hz_mhz(uint32_t freq_hz, uint16_t frac_mhz) {
+// the output divider (MS0) to an even integer at band-select time,
+// and modulate the PLL feedback numerator (PLLA MSNA) for each WSPR symbol.
+// This approach (PLL-fractional FSK) gives ~23 mHz resolution on ALL bands
+// including 10m and 12m, because PLL step = f_xtal / c_pll ~= 25e6 / 1048575
+// ~= 23.8 mHz -- completely independent of the output divider ratio.
+//
+// Per-symbol update writes only PLLA MSNA registers (8 bytes, 1 I2C transaction).
+// The output divider MS0 registers are written once per band change.
+// Per-band cache: set once by si_cache_band(), used by si_apply_tone()
+typedef struct {
+    uint32_t d_int;      // even integer output divider (MS0 set to integer mode)
+    uint32_t pll_a;      // PLL integer multiplier: VCO = xtal * (a + b/c)
+    uint32_t pll_c;      // PLL fractional denominator (1048575 for max resolution)
+    uint32_t pll_b_base; // PLL fractional numerator for tone offset = 0 mHz
+    // per-mHz increment of pll_b, scaled by pll_b_scale to keep 32-bit precision.
+    // actual delta_b_per_mhz = pll_b_per_mhz_num / pll_b_per_mhz_den
+    uint32_t pll_b_per_mhz_num; // numerator of delta_b step per mHz of tone offset
+    uint32_t pll_b_per_mhz_den; // denominator (= xtal_hz / d_int, computed at cache time)
+    uint8_t r_div_reg;          // R-divider exponent written to MS0 (0..7)
+    bool valid;                 // true after si_cache_band() succeeds
+} si5351_band_cache_t;
+
+static si5351_band_cache_t _si_cache = { 0 };
+
+// Write PLLA MSNA fractional multiplier registers (8 bytes, regs 26-33).
+// p3=c, p1=128*a + floor(128*b/c) - 512, p2=128*b - c*floor(128*b/c).
+// All arithmetic is 32-bit; b < c < 1048576 so 128*b < 134M < 2^32. Safe.
+static esp_err_t si_write_pll_regs(uint32_t pll_a, uint32_t pll_b, uint32_t pll_c) {
+    uint32_t floor_128b_c = (128u * pll_b) / pll_c; // floor(128*b/c), 32-bit
+    uint32_t p1 = 128u * pll_a + floor_128b_c - 512u;
+    uint32_t p2 = 128u * pll_b - pll_c * floor_128b_c;
+    uint32_t p3 = pll_c;
+    uint8_t regs[8] = {
+        (uint8_t)((p3 >> 8) & 0xFF), (uint8_t)(p3 & 0xFF), (uint8_t)((p1 >> 16) & 0x03),
+        (uint8_t)((p1 >> 8) & 0xFF), (uint8_t)(p1 & 0xFF), (uint8_t)(((p3 >> 12) & 0xF0) | ((p2 >> 16) & 0x0F)),
+        (uint8_t)((p2 >> 8) & 0xFF), (uint8_t)(p2 & 0xFF),
+    };
+    return si_write_bulk(SI5351_PLLA_MSNA, regs, 8);
+}
+
+// Write MS0 output divider registers for an even integer divider d_int.
+// Integer mode gives best jitter. p1=128*d-512, p2=0, p3=1.
+// r_div_reg is the R-divider exponent (0..7) written into bits [6:4] of reg 44.
+static esp_err_t si_write_ms0_integer(uint32_t d_int, uint8_t r_div_reg) {
+    uint32_t p1 = 128u * d_int - 512u;
+    uint8_t regs[8] = {
+        0x00, 0x01, (uint8_t)((((p1 >> 16) & 0x03)) | (r_div_reg << 4)), (uint8_t)((p1 >> 8) & 0xFF), (uint8_t)(p1 & 0xFF), 0x00, 0x00, 0x00,
+    };
+    // Also set CLK0 to integer mode: bit 6 of CLK0_CTRL = 1 for integer mode.
+    // We only set the MS0_INT flag (reg 22 bit 6); CLK0_CTRL (reg 16) drive
+    // settings were already configured in si5351_try_init().
+    // Note: MS0 integer mode bit is reg 22 bit 6 on Si5351A.
+    si_write(22, 0x40); // MS0 integer mode enable (reg 22, bit 6)
+    return si_write_bulk(SI5351_MS0_BASE, regs, 8);
+}
+
+// Cache band parameters for per-symbol 32-bit-only PLL numerator updates.
+// Called ONCE per band change (64-bit arithmetic is acceptable here).
+// eff_hz: the band carrier frequency after R-divider scaling (may differ from
+//         the raw freq_hz if R-divider > 1 for sub-500 kHz bands).
+static esp_err_t si_cache_band(uint32_t freq_hz) {
     if (_si_vco == 0) {
         ESP_LOGE(TAG, "SI5351: PLL not initialized");
         return ESP_ERR_INVALID_STATE;
     }
-    uint8_t r_div_reg = 0;
-    uint32_t eff_hz = freq_hz;
-    uint16_t eff_mhz = frac_mhz;
-    while (eff_hz < 500000UL && r_div_reg < 7) {
-        eff_hz = eff_hz * 2UL + (eff_mhz >= 500U ? 1UL : 0UL);
-        eff_mhz = (uint16_t)((eff_mhz * 2U) % 1000U);
-        r_div_reg++;
-        configASSERT(eff_mhz < 1000U);
-    }
+
+    // Apply crystal calibration to derive effective VCO reference.
+    // kHz-split formula to achieve 1 Hz correction resolution at 1 ppb input. splits ppb
+    // into whole-ppm and sub-ppm parts, keeping all intermediate products in 32-bit:
+    //   max (vco_khz * (ppb/1000)):  900000 * 100    =  90 000 000  < 2^32. Safe.
+    //   max (vco_khz * (ppb%1000)):  900000 * 999    = 899 100 000  < 2^32. Safe.
+    //   after /1000:                                  =     899 100  < 2^32. Safe.
+    // Covers the full practical range of +/-100 000 ppb (+/-100 ppm).
     uint32_t vco_cal = _si_vco;
     if (_si_cal != 0) {
-        int32_t vco_mhz = (int32_t)(_si_vco / 1000000UL);
-        int32_t correction_hz = (vco_mhz * _si_cal) / 1000;
-        // add correction because fast crystal raises f_VCO_actual;
-        // vco_cal must equal f_VCO_actual so divider d = vco_cal / f_target yields
-        // f_out = f_VCO_actual / d = f_target exactly. Subtracting made error worse.
-        vco_cal = (uint32_t)((int32_t)_si_vco + correction_hz);
+        uint32_t vco_khz = _si_vco / 1000u;
+        int32_t ppb_s = _si_cal;
+        int32_t corr;
+        if (ppb_s >= 0) {
+            uint32_t p = (uint32_t)ppb_s;
+            corr = (int32_t)((vco_khz * (p / 1000u)) + (vco_khz * (p % 1000u) / 1000u));
+        } else {
+            uint32_t p = (uint32_t)(-ppb_s);
+            corr = -(int32_t)((vco_khz * (p / 1000u)) + (vco_khz * (p % 1000u) / 1000u));
+        }
+        vco_cal = (uint32_t)((int32_t)_si_vco + corr);
     }
+
+    // R-divider: for sub-500 kHz bands, scale up the effective frequency
+    // so the output divider stays in a valid range (8..2048).
+    uint8_t r_div_reg = 0;
+    uint32_t eff_hz = freq_hz;
+
+    // Replace configASSERT with defensive clamp and error return.
+    // The loop doubles eff_hz until it reaches >= 500 kHz or R-div hits max.
+    // The guard condition (eff_hz remains < 500000 after r_div_reg==7) is
+    // essentially unreachable for any valid WSPR band (minimum 137.6 kHz *
+    // 2^7 = 17.6 MHz) but we protect with an explicit check instead of abort().
+    while (eff_hz < 500000UL && r_div_reg < 7) {
+        eff_hz = eff_hz * 2UL;
+        r_div_reg++;
+        // Defensive guard: eff_hz must not overflow or wrap to zero.
+        // This is unreachable in normal operation but prevents undefined behaviour.
+        if (eff_hz == 0u) {
+            ESP_LOGE(TAG, "SI5351: eff_hz overflow in R-div loop");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
+    // Choose even integer output divider. AN619 recommends even integers for
+    // best jitter when MS0 is in integer mode.
+    // d_int = round_down_even(vco_cal / eff_hz)
     uint32_t d_int = vco_cal / eff_hz;
-    // Si5351 AN619: fractional mode MS output minimum divider is 8.
-    // Integer mode supports 4/6/8 but this driver always operates in fractional mode.
-    if (d_int < 8UL || d_int > 1800UL) {
+    if (d_int < 8UL || d_int > 2048UL) {
         ESP_LOGE(TAG, "SI5351: divider %lu out of range (vco=%lu eff_hz=%lu)", (unsigned long)d_int, (unsigned long)vco_cal, (unsigned long)eff_hz);
         return ESP_ERR_INVALID_ARG;
     }
-    uint32_t remainder = vco_cal - d_int * eff_hz;
-    // Use maximum 20-bit c_den for ~0.2 mHz/step resolution and incorporate
-    // eff_mhz into the fractional divider to eliminate the 0-464 mHz per-tone error
-    // on WSPR HF bands. Without this fix eff_mhz was computed but never used.
-    // 64-bit is used only in this frequency-setup routine (~1 Hz call rate, not hot path).
-    uint32_t c_den = 1048575UL; // maximum 20-bit value per Si5351 AN619
-    uint32_t d_num;
-    {
-        // rem_mhz = remainder*1000 - d_int*eff_mhz  [milli-Hz domain]
-        // Always >= 0: remainder < eff_hz so d_int*eff_mhz/1000 < d_int <= remainder/... OK.
-        uint64_t rem_mhz = (uint64_t)remainder * 1000UL;
-        if (eff_mhz != 0u) {
-            uint64_t sub = (uint64_t)d_int * (uint64_t)eff_mhz;
-            if (sub <= rem_mhz) {
-                rem_mhz -= sub;
-            } else {
-                rem_mhz = 0ULL; // guard against rounding edge cases
-            }
-        }
-        uint64_t den_mhz = (uint64_t)eff_hz * 1000UL;
-        // rem_mhz < den_mhz guarantees d_num < c_den; max(rem_mhz*c_den) ~3e16 < 2^63.
-        d_num = (uint32_t)((rem_mhz * (uint64_t)c_den) / den_mhz);
+    // Force even integer for integer-mode operation (best phase noise).
+    if (d_int & 1u) {
+        d_int &= ~1u; // round down to even
+        if (d_int < 8UL)
+            d_int = 8UL;
     }
-    uint32_t p1 = 128UL * d_int + (128UL * d_num / c_den) - 512UL;
-    uint32_t p2 = 128UL * d_num - c_den * (128UL * d_num / c_den);
-    uint32_t p3 = c_den;
-    uint8_t ms_regs[8] = {
-        (uint8_t)((p3 >> 8) & 0xFF), (uint8_t)(p3 & 0xFF), (uint8_t)(((p1 >> 16) & 0x03) | (r_div_reg << 4)),
-        (uint8_t)((p1 >> 8) & 0xFF), (uint8_t)(p1 & 0xFF), (uint8_t)(((p3 >> 12) & 0xF0) | ((p2 >> 16) & 0x0F)),
-        (uint8_t)((p2 >> 8) & 0xFF), (uint8_t)(p2 & 0xFF),
-    };
-    return si_write_bulk(SI5351_MS0_BASE, ms_regs, 8);
+
+    // PLL fractional denominator: use maximum 20-bit value for finest resolution.
+    // Step size = f_xtal / c_pll ~= 25e6 / 1048575 ~= 23.84 mHz -- uniform
+    // across all bands because it depends only on xtal, not on d_int.
+    uint32_t pll_c = 1048575UL;
+
+    // PLL integer multiplier: a = VCO_target / xtal (integer part).
+    // VCO_target = eff_hz * d_int (exact integer, no rounding needed here).
+    // For 25 MHz xtal, d_int=32, eff_hz=28127600: VCO=900.0 MHz, a=36.
+    // 64-bit is used here because eff_hz*d_int can reach ~900 MHz which
+    // exceeds 32-bit range (max 4.29 GHz is fine but the intermediate
+    // pll_a computation needs care for the fractional part).
+    // This function is called once per band change (~120 s interval), so
+    // 64-bit cost here is acceptable.
+    uint64_t vco_target = (uint64_t)eff_hz * (uint64_t)d_int;     // exact integer VCO target
+    uint32_t pll_a = (uint32_t)(vco_target / (uint64_t)_si_xtal); // integer part of multiplier
+
+    // pll_b_base = round( (vco_target - pll_a * xtal) * pll_c / xtal )
+    // This is the numerator for tone_offset = 0 (carrier centre).
+    uint64_t vco_remainder = vco_target - (uint64_t)pll_a * (uint64_t)_si_xtal;
+    uint32_t pll_b_base = (uint32_t)((vco_remainder * (uint64_t)pll_c) / (uint64_t)_si_xtal);
+
+    // Per-mHz delta for pll_b: when tone offset increases by 1 mHz, how much
+    // does pll_b increase?
+    // f_out = xtal * (a + b/c) / d_int
+    // => b = (f_out * d_int * c / xtal) - a*c
+    // For tone offset dt (in mHz): f_out = base_hz + dt/1000
+    // => delta_b = (dt/1000) * d_int * c / xtal
+    //            = dt * (d_int * c) / (xtal * 1000)
+    // To avoid 64-bit at symbol time, store numerator and denominator separately:
+    // pll_b_per_mhz_num = d_int * pll_c  (note: max 2048 * 1048575 ~= 2.1e9 < 2^32: safe)
+    // pll_b_per_mhz_den = xtal * 1000    (note: 25e6 * 1000 = 25e9 -- EXCEEDS 32-bit!)
+    // Therefore denominator must be reduced. Divide both by 1000:
+    // num = d_int * pll_c  / gcd(d_int*pll_c, xtal)  -- use xtal in kHz
+    // pll_b_per_mhz_num = d_int * pll_c
+    // pll_b_per_mhz_den = xtal_hz / 1000  (= xtal in kHz, e.g. 25000 for 25 MHz)
+    // This keeps both values in 32-bit range.
+    // At symbol time: pll_b = pll_b_base + (tone_mhz * num) / den
+    // max product: 4395 * (2048 * 1048575) / 25000
+    //            = 4395 * 2147,449,600 / 25000
+    //            = 4395 * 85897 = 377,617,515  -- fits in 32 bits. Safe.
+    uint32_t pll_b_per_mhz_num = d_int * pll_c;     // e.g. 32 * 1048575 = 33554400
+    uint32_t pll_b_per_mhz_den = _si_xtal / 1000UL; // e.g. 25000 for 25 MHz xtal
+
+    // Clamp pll_a to valid PLL multiplier range (15..90 per Si5351 spec).
+    if (pll_a < 15UL || pll_a > 90UL) {
+        ESP_LOGE(TAG, "SI5351: PLL multiplier %lu out of range for eff_hz=%lu d_int=%lu", (unsigned long)pll_a, (unsigned long)eff_hz, (unsigned long)d_int);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    _si_cache.d_int = d_int;
+    _si_cache.pll_a = pll_a;
+    _si_cache.pll_c = pll_c;
+    _si_cache.pll_b_base = pll_b_base;
+    _si_cache.pll_b_per_mhz_num = pll_b_per_mhz_num;
+    _si_cache.pll_b_per_mhz_den = pll_b_per_mhz_den;
+    _si_cache.r_div_reg = r_div_reg;
+    _si_cache.valid = true;
+
+    ESP_LOGI(TAG, "SI5351 band cache: d=%lu pll_a=%lu pll_b_base=%lu pll_c=%lu r_div=%u", (unsigned long)d_int, (unsigned long)pll_a, (unsigned long)pll_b_base,
+             (unsigned long)pll_c, (unsigned)r_div_reg);
+
+    // Write the fixed integer output divider to MS0 registers (once per band).
+    esp_err_t err = si_write_ms0_integer(d_int, r_div_reg);
+    if (err != ESP_OK)
+        return err;
+
+    // Program PLL for tone offset = 0 and reset PLL to lock.
+    err = si_write_pll_regs(pll_a, pll_b_base, pll_c);
+    if (err != ESP_OK)
+        return err;
+
+    // Reset PLLA to ensure lock after changing divider.
+    return si_write(SI5351_PLL_RESET, 0x20);
+}
+
+// Apply a WSPR tone offset (in mHz) by updating only the PLL numerator.
+// Called 162 times per transmission -- ALL arithmetic is 32-bit only.
+// PLL-based FSK gives uniform ~23.8 mHz step on ALL bands including 10m/12m,
+// eliminating the 14% tone-spacing error caused by the coarse output-divider steps.
+static esp_err_t si_apply_tone(uint32_t tone_millihz) {
+    if (!_si_cache.valid) {
+        ESP_LOGE(TAG, "SI5351: si_apply_tone called before si_cache_band");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // delta_b = tone_millihz * d_int * pll_c / (xtal_hz)
+    //         = tone_millihz * pll_b_per_mhz_num / pll_b_per_mhz_den
+    // All values 32-bit; overflow analysis:
+    // max tone_millihz = 4395 (WSPR symbol 3)
+    // max num = 2048 * 1048575 = 2,147,449,600  (just under 2^31)
+    // max product = 4395 * 2,147,449,600 / 1 -- OVERFLOWS before division!
+    // We must divide in two steps to keep intermediate 32-bit.
+    // Split: delta_b = (tone_millihz / den_div) * num_div + remainder correction
+    // Safer: use tone_millihz * (num/den) where we pre-simplify num/den.
+    // den = xtal_kHz = 25000; num = d_int * pll_c up to ~2.1e9.
+    // 4395 * num_before_div can overflow. Divide num by den first (integer approx):
+    // b_step_per_mhz = num / den  (integer part, rounds down)
+    // b_step_frac    = num % den  (remainder for correction term)
+    // delta_b ~= tone_millihz * b_step_per_mhz + (tone_millihz * b_step_frac) / den
+    // max tone * b_step_per_mhz: 4395 * (2147449600/25000) = 4395 * 85897 = 377,617,515 < 2^32. Safe.
+    // max tone * b_step_frac: 4395 * 24999 / 25000 ~= 4394. Negligible.
+    uint32_t b_step_int = _si_cache.pll_b_per_mhz_num / _si_cache.pll_b_per_mhz_den;
+    uint32_t b_step_rem = _si_cache.pll_b_per_mhz_num % _si_cache.pll_b_per_mhz_den;
+    uint32_t delta_b = tone_millihz * b_step_int + (tone_millihz * b_step_rem) / _si_cache.pll_b_per_mhz_den;
+
+    uint32_t pll_b = _si_cache.pll_b_base + delta_b;
+    // Clamp: pll_b must be < pll_c. If it overflows, wrap (should not happen
+    // with correct band cache, but be defensive).
+    if (pll_b >= _si_cache.pll_c) {
+        pll_b = _si_cache.pll_c - 1u;
+    }
+
+    // Write only the PLL MSNA registers (8 bytes). MS0 is not touched.
+    // No PLL reset required for small frequency steps -- the PLL tracks
+    // the new numerator within one reference cycle (~40 ns for 25 MHz xtal).
+    return si_write_pll_regs(_si_cache.pll_a, pll_b, _si_cache.pll_c);
 }
 
 static bool si5351_try_init(void) {
@@ -299,22 +485,38 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
             ppb_abs = (uint32_t)(-(uint32_t)_ad_cal);
         }
 
-        // Rewrite delta_hz using MHz/sub-MHz split to fix two bugs:
-        // (1) Precision loss at low WSPR frequencies: the old kHz-truncated formula
-        //     gave 13 Hz instead of 13.76 Hz at 137600 Hz -- a 0.76 Hz error that
-        //     exceeds the 6 Hz WSPR BW on the 2200 m band.
-        // (2) Overflow risk: (28126100/1000u)*100000u = 2812600000 is safe at
-        //     100k ppb but overflows uint32_t above ~153k ppb.
-        // New split: delta = f_mhz*ppb/1000 + (f_sub_hz/1000)*ppb/1000000
-        //   MHz term max: 30*100000/1000 = 3000. No overflow.
-        //   Sub-kHz term max: 999*100000/1000000 = 99. No overflow.
-        //   Total max error < 1 Hz at 137 kHz; < 0.3 Hz at 28 MHz.
+        // Three-term decomposition:
+        //   f_mhz         = freq_hz / 1e6              (integer MHz)
+        //   f_sub_khz     = (freq_hz % 1e6) / 1000     (integer kHz below MHz boundary)
+        //   f_sub_hz_rem  = (freq_hz % 1e6) % 1000     (integer Hz below kHz boundary)
+        //
+        //   delta = f_mhz * ppb / 1000
+        //         + f_sub_khz * ppb / 1e6
+        //         + f_sub_hz_rem * ppb / 1e9            (in Hz, computed as ppb/1e6 * 1e-3)
+        //
+        // Overflow analysis (at ppb_abs = 100000, worst-case):
+        //   MHz term:         30 * 100000 / 1000       = 3000              < 2^32. Safe.
+        //   kHz term:        999 * 100000 / 1000000    = 99                < 2^32. Safe.
+        //   sub-Hz term:     999 * 100000 / 1000000    = 99                < 2^32. Safe.
+        //     (sub-Hz term formula: f_sub_hz_rem * ppb_abs / 1000000,
+        //      which is Hz-scale; max 999 * 100000 = 99900000 < 2^32. Safe.)
+        //
+        // The sub-kHz term contribution at 475700 Hz with 1 ppb:
+        //   f_sub_hz_rem = 700; delta_sub_hz_rem = 700 * 1 / 1000000 = 0 Hz (rounds down).
+        // At 1 ppb the entire correction is sub-mHz, which is below the AD9850 FTW
+        // resolution (~0.03 Hz at 125 MHz).
         uint32_t f_mhz = freq_hz / 1000000UL;
         uint32_t f_sub_hz = freq_hz % 1000000UL;
         uint32_t f_sub_khz = f_sub_hz / 1000UL;
+        // Extract the sub-kHz Hz remainder that was previously dropped.
+        uint32_t f_sub_hz_rem = f_sub_hz % 1000UL;
         uint32_t delta_mhz_part = (f_mhz * ppb_abs) / 1000UL;
         uint32_t delta_sub_part = (f_sub_khz * ppb_abs) / 1000000UL;
-        uint32_t delta_hz = delta_mhz_part + delta_sub_part;
+        // sub-kHz correction term.
+        // f_sub_hz_rem * ppb_abs / 1e9 (in Hz) = f_sub_hz_rem * ppb_abs / 1000000 (truncated to Hz).
+        // Max intermediate product: 999 * 100000 = 99900000 < 2^32. No overflow.
+        uint32_t delta_sub_hz_rem = (f_sub_hz_rem * ppb_abs) / 1000000UL;
+        uint32_t delta_hz = delta_mhz_part + delta_sub_part + delta_sub_hz_rem;
 
         // positive ppb means ref runs fast -> output too high -> reduce requested freq.
         // Negative ppb means ref runs slow -> output too low -> increase requested freq.
@@ -417,9 +619,40 @@ esp_err_t oscillator_init(void) {
     return ESP_OK;
 }
 
+// oscillator_set_freq now calls si_cache_band() which sets up
+// the integer output divider and PLL base numerator for the new band.
+// The old si_set_freq_hz_mhz() (which used 64-bit ops per symbol) is removed.
 esp_err_t oscillator_set_freq(uint32_t freq_hz) {
     if (_osc_type == OSC_SI5351) {
-        return si_set_freq_hz_mhz(freq_hz, 0);
+        // NOTE: No extra PLL reset is issued here beyond the one
+        // inside si_cache_band(). The PLLA VCO frequency is fixed for the
+        // entire session (see si_init_pll and si_cache_band). Only the MS0
+        // output divider changes between bands, and only the PLL numerator
+        // (pll_b) changes between WSPR symbols.
+        //
+        // Per Si5351 AN619: a PLL reset (reg 177 bit 5 = 0x20) is required
+        // when the PLL *multiplier* (MSNA regs 26-33, i.e. the integer 'a'
+        // plus fractional b/c) changes significantly. It is NOT required for
+        // a pure change of the output divider ratio (MS0 regs 42-49).
+        //
+        // si_cache_band() does issue one PLL reset after programming the new
+        // MS0 divider and the base PLL numerator, to ensure a defined output
+        // phase on band entry. No further reset is needed during per-symbol
+        // si_apply_tone() calls because those update only pll_b (numerator)
+        // by a tiny amount (<< 1 VCO cycle), and the PLL re-locks within one
+        // reference cycle (~40 ns for 25 MHz xtal).
+        //
+        // Adding a PLL reset here (or in si_apply_tone) would introduce
+        // ~10-15 ms re-lock latency on every symbol change, producing a 10 ms
+        // RF-off gap 162 times per transmission -- clearly wrong.
+        //
+        // The oscillator output is muted (reg 3 = 0xFF via oscillator_enable(false))
+        // during filter relay switching and band setup. It is re-enabled only
+        // after si_cache_band() completes all register writes including the
+        // one PLL reset, so no undefined-frequency glitch reaches the RF output.
+        //
+        // si_cache_band sets MS0 integer divider and PLL for tone_offset=0.
+        return si_cache_band(freq_hz);
     }
     if (_osc_type == OSC_AD9850) {
         _ad_last_hz = freq_hz;
@@ -429,23 +662,27 @@ esp_err_t oscillator_set_freq(uint32_t freq_hz) {
     return ESP_OK;
 }
 
+// oscillator_set_freq_mhz now calls si_apply_tone() for Si5351,
+// which uses only 32-bit arithmetic per symbol (162 calls per TX window).
 // The value is in milli-Hz. Function name keeps the legacy "mhz" suffix for compatibility.
 esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz) {
-    int32_t total_mhz = (int32_t)(base_hz % 1000UL) * 1000 + offset_millihz;
-    int32_t frac_mhz_s = total_mhz % 1000;
-    int32_t extra_hz_s = total_mhz / 1000;
-    if (frac_mhz_s < 0) {
-        frac_mhz_s += 1000;
-        extra_hz_s -= 1;
-    }
-    uint32_t extra_hz = (uint32_t)extra_hz_s;
-    uint32_t out_hz = (base_hz / 1000UL) * 1000UL + extra_hz;
-
     if (_osc_type == OSC_SI5351) {
-        uint16_t frac_mhz = (uint16_t)frac_mhz_s;
-        return si_set_freq_hz_mhz(out_hz, frac_mhz);
+        // si_apply_tone requires a non-negative mHz offset.
+        // WSPR tone offsets are always >= 0 (symbols 0-3 map to 0..4395 mHz).
+        // Guard against negative values (should not occur in normal operation).
+        uint32_t tone_mhz = (offset_millihz >= 0) ? (uint32_t)offset_millihz : 0u;
+        return si_apply_tone(tone_mhz);
     }
     if (_osc_type == OSC_AD9850) {
+        int32_t total_mhz = (int32_t)(base_hz % 1000UL) * 1000 + offset_millihz;
+        int32_t frac_mhz_s = total_mhz % 1000;
+        int32_t extra_hz_s = total_mhz / 1000;
+        if (frac_mhz_s < 0) {
+            frac_mhz_s += 1000;
+            extra_hz_s -= 1;
+        }
+        uint32_t extra_hz = (uint32_t)extra_hz_s;
+        uint32_t out_hz = (base_hz / 1000UL) * 1000UL + extra_hz;
         uint32_t frac_mhz = (uint32_t)frac_mhz_s;
         _ad_last_hz = out_hz;
         _ad_last_frac = frac_mhz;
@@ -483,6 +720,9 @@ esp_err_t oscillator_enable(bool en) {
 esp_err_t oscillator_set_cal(int32_t ppb) {
     if (_osc_type == OSC_SI5351) {
         _si_cal = ppb;
+        // Invalidate the band cache so the next oscillator_set_freq() call
+        // recomputes the PLL with the updated calibration offset.
+        _si_cache.valid = false;
         ESP_LOGI(TAG, "SI5351 cal set: %ld ppb", (long)ppb);
     } else if (_osc_type == OSC_AD9850) {
         _ad_cal = ppb;

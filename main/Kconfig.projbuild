@@ -45,9 +45,15 @@ menu "WSPR Transmitter"
     config SI5351_XTAL_FREQ
         int "Si5351 crystal frequency (Hz)"
         default 25000000
+        range 10000000 40000000
         help
             Crystal frequency on the Si5351 module.
-            Common values: 25000000 or 27000000.
+            Common values: 25000000 (25 MHz) or 27000000 (27 MHz).
+            The Si5351A supports 10-40 MHz input crystals per the datasheet.
+            Values outside this range will cause the PLL to fail or operate
+            outside specifications. A 50 MHz or 100 MHz value would cause
+            the VCO to exceed the 900 MHz maximum, resulting in silent lock
+            failure or an incorrect output frequency.
 
     choice SI5351_DRIVE_MA
         prompt "Si5351 CLK0 output drive current"
@@ -110,7 +116,7 @@ menu "WSPR Transmitter"
             bool "NTP (SNTP over WiFi)"
 
         config WSPR_TIME_GPS
-            bool "GPS (NMEA RMC sentences via UART)"
+            bool "GPS (NMEA RMC/ZDA sentences via UART)"
 
     endchoice
 
@@ -138,6 +144,21 @@ menu "WSPR Transmitter"
             default 9600
             help
                 Serial baud rate of the GPS module. Most modules default to 9600.
+
+        config GPS_PPS_GPIO
+            int "GPS PPS GPIO (-1 to disable)"
+            default -1
+            range -1 39
+            help
+                GPIO connected to the GPS module PPS (Pulse-Per-Second) output.
+                Set to -1 (default) to disable PPS and rely on NMEA timing only.
+                When set to a valid GPIO (0-39), a rising-edge ISR fires on each
+                PPS pulse and snaps the system clock sub-second component to zero,
+                correcting UART latency jitter (~10 ms) down to a few microseconds.
+                The NMEA RMC or ZDA sentence must still provide the correct UTC
+                second value; PPS only improves the sub-second accuracy.
+                The GPIO must support input mode and external interrupts.
+                Avoid GPIO 6-11 (SPI flash) and strapping pins (0, 2, 12, 15).
 
     endif
 
@@ -185,7 +206,7 @@ menu "WSPR Transmitter"
         help
             Display language for the web configuration interface.
             The selected language file (webui_XX.h) is included at compile time
-            via webui_strings.h — no runtime overhead or extra flash storage.
+            via webui_strings.h -- no runtime overhead or extra flash storage.
             To add a new language, create webui_XX.h with all WEBUI_* macros
             defined, add a config entry here, and add the #elif in webui_strings.h.
 
@@ -201,13 +222,28 @@ menu "WSPR Transmitter"
         bool "Enable task watchdog for scheduler task"
         default n
         help
-            Register the WSPR scheduler task with the ESP-IDF task watchdog.
+            Registers the WSPR scheduler task with the ESP-IDF task watchdog.
             When enabled, esp_task_wdt_add() is called at scheduler_task startup
-            and esp_task_wdt_reset() is called once per WSPR symbol (every ~683 ms)
-            during transmission. The watchdog fires if the scheduler task stalls
-            for longer than the WDT timeout configured in Component config.
-            Disable if using the default IDF task watchdog configuration or if
-            the WDT is not enabled in sdkconfig.
+            and esp_task_wdt_reset() is called once per WSPR symbol (~683 ms)
+            during transmission and once per second during idle/wait states.
+
+            IMPORTANT -- WDT timeout requirement:
+            The ESP-IDF task watchdog timeout (CONFIG_ESP_TASK_WDT_TIMEOUT_S,
+            found under Component config -> ESP System Settings) MUST be set to
+            at least 2 seconds (>= 2 x 683 ms symbol period) to avoid false
+            watchdog trips between symbols. A timeout of 1 s or less will cause
+            continuous reboots during WSPR transmission. A value of 3-5 s is
+            recommended to provide comfortable margin.
+
+            IMPORTANT -- sdkconfig dependency:
+            This option requires CONFIG_ESP_TASK_WDT=y in sdkconfig (Component
+            config -> ESP System Settings -> Enable Task Watchdog Timer). If the
+            system-level task WDT is not enabled, esp_task_wdt_add() returns
+            ESP_ERR_INVALID_STATE and the watchdog will not be active (a warning
+            is logged). This option has no effect when CONFIG_ESP_TASK_WDT=n.
+
+            Disable for development builds, when using JTAG debugging, or when
+            the task WDT is not configured in sdkconfig.
 
     config WSPR_SYMBOL_OVERRUN_LOG
         bool "Log symbol timing overruns"

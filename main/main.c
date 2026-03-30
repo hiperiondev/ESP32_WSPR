@@ -122,8 +122,16 @@ static void rebuild_active_bands(void) {
     g_cfg.bands_changed = false; // clear the flag after rebuild to prevent unnecessary calls in scheduler
 }
 
-static void select_next_band(bool force_next) {
-    rebuild_active_bands();
+// force_rebuild parameter to select_next_band().
+// O(BAND_COUNT=12) loop that clears and repopulates g_hop_active_bands[]. It only needs to run when:
+//   (a) the band list has actually changed (need_rebuild=true from bands_changed), or
+//   (b) the active-band array has never been populated (g_hop_active_count==0).
+// Passing force_rebuild=true from the scheduler when need_rebuild is set
+// ensures correctness while avoiding the unnecessary loop on every hop cycle.
+static void select_next_band(bool force_next, bool force_rebuild) {
+    // Conditionally rebuild: only when explicitly requested or on first call.
+    if (force_rebuild || g_hop_active_count == 0)
+        rebuild_active_bands();
 
     if (g_cfg.hop_enabled && force_next) {
         g_hop_ptr = (g_hop_ptr + 1) % g_hop_active_count;
@@ -144,11 +152,17 @@ static void wspr_transmit(void) {
     char snap_locator[LOCATOR_LEN];
     uint8_t snap_power;
     uint8_t snap_parity;
+    // snap_region added to the locked snapshot to eliminate the C11 data race
+    // on g_cfg.iaru_region. Previously it was read unlocked on the base_hz line,
+    // which is undefined behaviour when the HTTP task writes it concurrently.
+    // status_task already read it under the lock; wspr_transmit() now does the same.
+    uint8_t snap_region;
     web_server_cfg_lock();
     memcpy(snap_callsign, g_cfg.callsign, CALLSIGN_LEN);
     memcpy(snap_locator, g_cfg.locator, LOCATOR_LEN);
     snap_power = g_cfg.power_dbm;
     snap_parity = g_cfg.tx_slot_parity;
+    snap_region = g_cfg.iaru_region; // snapshot iaru_region under the mutex
     web_server_cfg_unlock();
 
     // Guard against empty callsign or locator before encoding.
@@ -217,12 +231,14 @@ static void wspr_transmit(void) {
         return;
     }
 
+    // Use snap_region (captured under mutex above) instead of the
+    // unlocked g_cfg.iaru_region read that was here previously.
     // base_hz computed before the filter switch; oscillator_set_freq()
     // pre-programs the correct band frequency with RF output still off so
     // the relay never routes a stale previous-band signal through the new
     // filter passband.  vTaskDelay after gpio_filter_select() lets
     // relay contacts settle before the oscillator output is enabled.
-    uint32_t base_hz = config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx) + 1500u;
+    uint32_t base_hz = config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx) + 1500u;
     oscillator_set_freq(base_hz);
     gpio_filter_select(BAND_FILTER[g_band_idx]);
     // WSPR_LPF_SETTLE_MS: settle time driven by Kconfig
@@ -239,8 +255,9 @@ static void wspr_transmit(void) {
     // stack overflows during the ~110 s transmission window.  The scheduler_task
     // stack is 8 KiB; this value confirms how much headroom remains at TX entry.
     // Also log message type and slot parity for Type-2/3 diagnosis.
+    // Use snap_region for the log line as well (was g_cfg.iaru_region).
     ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
-             (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)snap_parity,
+             (unsigned long)config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)snap_parity,
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
@@ -370,11 +387,21 @@ static void scheduler_task(void *arg) {
     // esp_task_wdt_reset() is called every symbol (~683 ms) during TX;
     // during idle the scheduler loops on vTaskDelay(1000) which keeps
     // the inter-reset interval well under any sane WDT timeout.
+// Check the return value of esp_task_wdt_add().
+// Previously the return value was silently discarded. If CONFIG_ESP_TASK_WDT
+// is not enabled in sdkconfig, esp_task_wdt_add() returns ESP_ERR_INVALID_STATE
+// and the watchdog is NOT active -- the old code gave no indication of this.
+// Now a LOGW is emitted so the developer knows WDT registration failed.
 #if CONFIG_WSPR_TASK_WDT_ENABLE
-    esp_task_wdt_add(NULL);
+    {
+        esp_err_t wdt_err = esp_task_wdt_add(NULL);
+        if (wdt_err != ESP_OK)
+            ESP_LOGW(TAG, "WDT add failed (%s) -- watchdog not active for scheduler task", esp_err_to_name(wdt_err));
+    }
 #endif
 
-    select_next_band(false);
+    // Pass force_rebuild=true on the initial call: band list is empty at startup.
+    select_next_band(false, true);
 
     uint32_t last_hop_ts = 0;
     // initialize to 100 so the very first eligible TX slot fires
@@ -491,7 +518,11 @@ static void scheduler_task(void *arg) {
             bool do_hop = hop_en && (now - last_hop_ts) >= hop_intv;
 
             if (do_hop || g_band_idx < 0 || need_rebuild) {
-                select_next_band(do_hop);
+                // Pass need_rebuild as force_rebuild so the O(BAND_COUNT)
+                // list rebuild only runs when the band configuration actually changed
+                // or the band index is uninitialised (g_band_idx < 0). On hop-only
+                // cycles the cached list is reused and only the pointer is advanced.
+                select_next_band(do_hop, need_rebuild || g_band_idx < 0);
                 last_hop_ts = now;
             }
 

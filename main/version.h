@@ -23,7 +23,7 @@
 #define VERSION_H_
 
 /**
- * @def _VERSION_MAYOR
+ * @def VERSION_MAYOR
  * @brief Indicate a really big change that can cause a incompatibilities with previous versions.
  */
 #define VERSION_MAYOR 1

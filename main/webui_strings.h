@@ -26,5 +26,7 @@
 #elif defined(CONFIG_WEBUI_LANG_ES)
 #include "webui_es.h"
 #else
-#include "webui_es.h"
+// Fall back to English (the reference language)
+#warning "Unknown WEBUI language config -- defaulting to English"
+#include "webui_en.h"
 #endif
