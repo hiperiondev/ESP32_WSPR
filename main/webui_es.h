@@ -105,4 +105,4 @@
 
 // mensajes de error de validacion en cliente para indicativo y localizador
 #define WEBUI_JS_ERR_CALLSIGN "Indicativo inv\u00e1lido (3-11 car., solo A-Z 0-9 y espacio)"
-#define WEBUI_JS_ERR_LOCATOR  "Localizador inv\u00e1lido (4 car.: formato AA00, ej. GF05)"
+#define WEBUI_JS_ERR_LOCATOR  "Localizador inv\u00e1lido (4 o 6 car.: formato AA00 o AA00AA, ej. GF05 o GF05ab)"

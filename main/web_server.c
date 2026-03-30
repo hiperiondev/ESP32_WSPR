@@ -332,7 +332,7 @@ static const char INDEX_HTML[] =
 
     "if(!body.callsign||body.callsign.length<3||!/^[A-Z0-9 ]{3,11}$/.test(body.callsign)){"
     "toast('\u274c " WEBUI_JS_ERR_CALLSIGN "','err');return;}"
-    "if(!body.locator||!/^[A-Ra-r]{2}[0-9]{2}$/.test(body.locator)){"
+    "if(!body.locator||!/^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$/.test(body.locator)){"
     "toast('\u274c " WEBUI_JS_ERR_LOCATOR "','err');return;}"
     "const validPowers=[0,3,7,10,13,17,20,23,27,30,33,37,40,43,47,50,53,57,60];"
     "if(!validPowers.includes(body.power_dbm)){"

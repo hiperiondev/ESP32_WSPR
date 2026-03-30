@@ -102,4 +102,4 @@
 #define WEBUI_REBOOT_CAUSE_PREFIX " \u2502 Cause: "
 
 #define WEBUI_JS_ERR_CALLSIGN "Invalid callsign (3-11 chars, A-Z 0-9 and space only)"
-#define WEBUI_JS_ERR_LOCATOR  "Invalid locator (4 chars: AA00 format, e.g. GF05)"
+#define WEBUI_JS_ERR_LOCATOR  "Invalid locator (4 or 6 chars: AA00 or AA00AA format, e.g. GF05 or GF05ab)"
