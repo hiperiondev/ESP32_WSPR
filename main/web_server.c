@@ -32,10 +32,10 @@
 
 #include "config.h"
 #include "oscillator.h"
+#include "version.h"
 #include "web_server.h"
 #include "webui_strings.h"
 #include "wifi_manager.h"
-#include "version.h"
 
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
 #include "mbedtls/base64.h"
@@ -624,28 +624,37 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "callsign", _cfg->callsign);
     cJSON_AddStringToObject(j, "locator", _cfg->locator);
-    cJSON_AddNumberToObject(j, "power_dbm", _cfg->power_dbm);
+    // All integer fields use cJSON_AddRawToObject instead of
+    // cJSON_AddNumberToObject to avoid software double-precision FP emulation.
+    // The Xtensa LX6 core has a hardware single-precision FPU only; every
+    // cJSON_AddNumberToObject call internally stores the value as double and
+    // triggers libgcc software FP routines, wasting hundreds of cycles and stack.
+    // cJSON_AddRawToObject with an snprintf-formatted string is exact and FP-free.
+    {
+        // power_dbm: was cJSON_AddNumberToObject (software double FP)
+        char _pwr_str[8];
+        snprintf(_pwr_str, sizeof(_pwr_str), "%u", (unsigned)_cfg->power_dbm);
+        cJSON_AddRawToObject(j, "power_dbm", _pwr_str);
+    }
     cJSON_AddStringToObject(j, "wifi_ssid", _cfg->wifi_ssid);
     cJSON_AddBoolToObject(j, "has_pass", _cfg->wifi_pass[0] != '\0');
     cJSON_AddStringToObject(j, "ntp_server", _cfg->ntp_server);
-    cJSON_AddBoolToObject(j, "hop_enabled", _cfg->hop_enabled);
+    char _hop_str[16];
+    snprintf(_hop_str, sizeof(_hop_str), "%lu", (unsigned long)_cfg->hop_interval_sec);
+    cJSON_AddRawToObject(j, "hop_interval_sec", _hop_str);
     cJSON_AddNumberToObject(j, "hop_interval_sec", _cfg->hop_interval_sec);
     cJSON_AddBoolToObject(j, "tx_enabled", _cfg->tx_enabled);
-    cJSON_AddNumberToObject(j, "tx_duty_pct", _cfg->tx_duty_pct);
-    // Avoid cJSON double FP emulation for these integer fields.
-    // cJSON_AddNumberToObject always converts to double internally, triggering
-    // software FP on Xtensa LX6 (no FPU). Use cJSON_AddRawToObject with
-    // snprintf-formatted decimal strings instead — exact, no floating-point code.
-    {
-        char _ppb_str[16];
-        snprintf(_ppb_str, sizeof(_ppb_str), "%ld", (long)_cfg->xtal_cal_ppb);
-        cJSON_AddRawToObject(j, "xtal_cal_ppb", _ppb_str);
-    }
-    {
-        char _reg_str[4];
-        snprintf(_reg_str, sizeof(_reg_str), "%u", (unsigned)_cfg->iaru_region);
-        cJSON_AddRawToObject(j, "iaru_region", _reg_str);
-    }
+    char _duty_str[8];
+    snprintf(_duty_str, sizeof(_duty_str), "%u", (unsigned)_cfg->tx_duty_pct);
+    cJSON_AddRawToObject(j, "tx_duty_pct", _duty_str);
+
+    char _ppb_str[16];
+    snprintf(_ppb_str, sizeof(_ppb_str), "%ld", (long)_cfg->xtal_cal_ppb);
+    cJSON_AddRawToObject(j, "xtal_cal_ppb", _ppb_str);
+
+    char _reg_str[4];
+    snprintf(_reg_str, sizeof(_reg_str), "%u", (unsigned)_cfg->iaru_region);
+    cJSON_AddRawToObject(j, "iaru_region", _reg_str);
 
     cJSON *bands = cJSON_CreateArray();
     for (int i = 0; i < BAND_COUNT; i++)

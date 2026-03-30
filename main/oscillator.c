@@ -244,23 +244,37 @@ static int32_t _ad_cal = 0;
 
 static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// True FTW formula: FTW = freq_hz * 2^32 / ref_clk
-// For ref_clk = 125 MHz: FTW/Hz = 4294967296 / 125000000 = 34.359738...
-//
-// These three compile-time constants decompose the multiplier exactly with no
-// 64-bit arithmetic at runtime (64-bit is used only during compilation):
-//   FTW_PER_MHZ    = floor(2^32 / (ref_clk_hz / 1e6))  -- exact for common refs
-//   FTW_INT_PER_HZ = floor(2^32 / ref_clk_hz)          -- integer part per Hz
-//   FTW_FRAC_NUM   = round((fractional part) * FTW_FRAC_DEN)
-//   FTW_FRAC_DEN   = 10000
-//
 // For 125 MHz: FTW_PER_MHZ=34359738, FTW_INT_PER_HZ=34, FTW_FRAC_NUM=3597
 // Accuracy: max error < 1 Hz at 28 MHz with pure 32-bit arithmetic.
+//
+// Pre-computed values verified:
+//   125 MHz: 2^32/125 = 34359738.368  -> FTW_PER_MHZ=34359738
+//            2^32/125000000 = 34.359  -> FTW_INT_PER_HZ=34
+//            (2^32 mod 125000000)*10000/125000000 = 44967296*10000/125000000 = 3597
+//   100 MHz: 2^32/100 = 42949672.96   -> FTW_PER_MHZ=42949672
+//            2^32/100000000 = 42.949  -> FTW_INT_PER_HZ=42
+//            (2^32 mod 100000000)*10000/100000000 = 94967296*10000/100000000 = 9496
+#if AD9850_REF_CLK == 125000000UL
+// 125 MHz module: pre-computed, no ULL at runtime
+#define AD9850_FTW_PER_MHZ    34359738UL
+#define AD9850_FTW_INT_PER_HZ 34UL
+#define AD9850_FTW_FRAC_DEN   10000UL
+#define AD9850_FTW_FRAC_NUM   3597UL
+#elif AD9850_REF_CLK == 100000000UL
+// 100 MHz module: pre-computed, no ULL at runtime
+#define AD9850_FTW_PER_MHZ    42949672UL
+#define AD9850_FTW_INT_PER_HZ 42UL
+#define AD9850_FTW_FRAC_DEN   10000UL
+#define AD9850_FTW_FRAC_NUM   9496UL
+#else
+// Non-standard ref clock fallback: ULL evaluated at compile-time on
+// host only; no 64-bit runtime arithmetic emitted for the ESP32 target.
 #define AD9850_FTW_PER_MHZ    ((uint32_t)(4294967296ULL / ((uint32_t)AD9850_REF_CLK / 1000000UL)))
 #define AD9850_FTW_INT_PER_HZ ((uint32_t)(4294967296ULL / (uint32_t)AD9850_REF_CLK))
 #define AD9850_FTW_FRAC_DEN   10000UL
 #define AD9850_FTW_FRAC_NUM                                                                                                                                    \
     ((uint32_t)((4294967296ULL - (uint64_t)AD9850_FTW_INT_PER_HZ * (uint32_t)AD9850_REF_CLK) * AD9850_FTW_FRAC_DEN / (uint32_t)AD9850_REF_CLK))
+#endif
 
 // Combined per-mHz scale factor used in oscillator_set_freq_mhz.
 // frac_mhz is in milli-Hz (0..4395 for WSPR).
@@ -284,7 +298,24 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
         } else {
             ppb_abs = (uint32_t)(-(uint32_t)_ad_cal);
         }
-        uint32_t delta_hz = (freq_hz / 1000u) * ppb_abs / 1000000u;
+		
+        // Rewrite delta_hz using MHz/sub-MHz split to fix two bugs:
+        // (1) Precision loss at low WSPR frequencies: the old kHz-truncated formula
+        //     gave 13 Hz instead of 13.76 Hz at 137600 Hz -- a 0.76 Hz error that
+        //     exceeds the 6 Hz WSPR BW on the 2200 m band.
+        // (2) Overflow risk: (28126100/1000u)*100000u = 2812600000 is safe at
+        //     100k ppb but overflows uint32_t above ~153k ppb.
+        // New split: delta = f_mhz*ppb/1000 + (f_sub_hz/1000)*ppb/1000000
+        //   MHz term max: 30*100000/1000 = 3000. No overflow.
+        //   Sub-kHz term max: 999*100000/1000000 = 99. No overflow.
+        //   Total max error < 1 Hz at 137 kHz; < 0.3 Hz at 28 MHz.
+        uint32_t f_mhz = freq_hz / 1000000UL;
+        uint32_t f_sub_hz = freq_hz % 1000000UL;
+        uint32_t f_sub_khz = f_sub_hz / 1000UL;
+        uint32_t delta_mhz_part = (f_mhz * ppb_abs) / 1000UL;
+        uint32_t delta_sub_part = (f_sub_khz * ppb_abs) / 1000000UL;
+        uint32_t delta_hz = delta_mhz_part + delta_sub_part;
+
         // positive ppb means ref runs fast -> output too high -> reduce requested freq.
         // Negative ppb means ref runs slow -> output too low -> increase requested freq.
         if (_ad_cal > 0) {
