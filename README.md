@@ -4,7 +4,7 @@
 
 [![Logo](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/logo.jpg)](https://github.com/hiperiondev/ESP32_WSPR)
 
-# ESP32\_WSPR
+# WSPR Transmitter
 
 **ESP32 WSPR (Weak Signal Propagation Reporter) Transmitter**
 
@@ -49,7 +49,7 @@
 
 ## About The Project
 
-**ESP32\_WSPR** is a complete, standalone WSPR (Weak Signal Propagation Reporter) beacon transmitter firmware built on Espressif's **ESP-IDF** framework for the ESP32 microcontroller family. Unlike most hobby WSPR projects that rely on the Arduino ecosystem, this firmware is written in pure C against the native ESP-IDF APIs, giving it access to FreeRTOS task management, the native SNTP client, the `esp_wifi` stack, `nvs_flash` persistent storage, and the `esp_http_server` web server — all without the overhead of the Arduino HAL.
+**WSPR Transmitter** is a complete, standalone WSPR (Weak Signal Propagation Reporter) beacon transmitter firmware built on Espressif's **ESP-IDF** framework for the ESP32 microcontroller family. Unlike most hobby WSPR projects that rely on the Arduino ecosystem, this firmware is written in pure C against the native ESP-IDF APIs, giving it access to FreeRTOS task management, the native SNTP client, the `esp_wifi` stack, `nvs_flash` persistent storage, and the `esp_http_server` web server — all without the overhead of the Arduino HAL.
 
 The project is designed to be production-ready for unattended beacon operation: it encodes WSPR Type-1 messages entirely on-chip, drives an RF oscillator (Si5351A or AD9850) with sub-Hz symbol resolution, selects the correct band-pass / low-pass filter automatically via a 3-bit GPIO bus, synchronises time via NTP or GPS, and exposes a responsive single-page web application for configuration and monitoring. All user settings are persisted in the ESP32's NVS (non-volatile storage) flash partition and survive power cycles.
 
