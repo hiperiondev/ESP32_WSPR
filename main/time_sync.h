@@ -88,6 +88,16 @@
  */
 esp_err_t time_sync_init(const char *ntp_server);
 
+// MODIFIED (Bug 7): declared time_sync_restart_ntp() for NTP mode only.
+// GPS mode has no equivalent because the UART-based time source is always
+// active and does not use a configurable server hostname.
+// Called from h_post_config() in web_server.c when the user changes the NTP
+// server hostname via the web UI. Allows the change to take effect immediately
+// without requiring a device reboot.
+#ifdef CONFIG_WSPR_TIME_NTP
+void time_sync_restart_ntp(const char *ntp_server);
+#endif
+
 /**
  * @brief Check whether the system clock is currently synchronised.
  *

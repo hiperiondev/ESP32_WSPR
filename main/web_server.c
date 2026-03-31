@@ -32,6 +32,9 @@
 
 #include "config.h"
 #include "oscillator.h"
+// MODIFIED (Bug 7): included time_sync.h to call time_sync_restart_ntp() when
+// the NTP server hostname changes via POST /api/config.
+#include "time_sync.h"
 #include "version.h"
 #include "web_server.h"
 #include "webui_strings.h"
@@ -336,9 +339,9 @@ static const char INDEX_HTML[] =
     "if(!body.callsign||body.callsign.length<3||body.callsign.length>11||"
     "!/^[A-Z0-9 /]{3,11}$/.test(body.callsign)||"
     "(body.callsign.match(/\\//g)||[]).length>1){"
-    "toast('\u274c " WEBUI_JS_ERR_CALLSIGN "','err');return;}"
+    "toast('\\u274c " WEBUI_JS_ERR_CALLSIGN "','err');return;}"
     "if(!body.locator||!/^[A-Ra-r]{2}[0-9]{2}([A-Xa-x]{2})?$/.test(body.locator)){"
-    "toast('\u274c " WEBUI_JS_ERR_LOCATOR "','err');return;}"
+    "toast('\\u274c " WEBUI_JS_ERR_LOCATOR "','err');return;}"
     "const validPowers=[0,3,7,10,13,17,20,23,27,30,33,37,40,43,47,50,53,57,60];"
     "if(!validPowers.includes(body.power_dbm)){"
     "let best=validPowers[0];let minDiff=Math.abs(body.power_dbm-best);for(let v of validPowers){let "
@@ -691,6 +694,9 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// MODIFIED (Bug 7): h_post_config now detects an NTP server hostname change and
+// calls time_sync_restart_ntp() after saving so the new server takes effect
+// immediately without requiring a reboot.
 static esp_err_t h_post_config(httpd_req_t *req) {
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
     if (!check_auth(req))
@@ -744,6 +750,14 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     }
 
     web_server_cfg_lock();
+
+    // MODIFIED (Bug 7): snapshot the current NTP server before overwriting it so
+    // we can detect a change after releasing the lock and restart the SNTP client.
+    // The snapshot must be taken inside the lock to avoid a race with another
+    // concurrent POST /api/config call (unlikely but possible in theory).
+    char old_ntp_snap[sizeof(_cfg->ntp_server)];
+    strncpy(old_ntp_snap, _cfg->ntp_server, sizeof(old_ntp_snap) - 1);
+    old_ntp_snap[sizeof(old_ntp_snap) - 1] = '\0';
 
     cJSON *v;
     if (v_cs && cJSON_IsString(v_cs)) {
@@ -849,6 +863,16 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     // reprogram hardware until the next frequency-set call, making this safe
     // to call from the HTTP task at any time, even during an active TX.
     oscillator_set_cal(new_cal_ppb);
+
+    // MODIFIED (Bug 7): if the NTP server hostname changed, restart the SNTP
+    // client immediately so the new server is used without requiring a reboot.
+    // cfg_snap.ntp_server holds the newly applied value captured inside the lock.
+    // Compiled only in NTP mode; GPS mode has no configurable server hostname.
+#ifdef CONFIG_WSPR_TIME_NTP
+    if (strncmp(old_ntp_snap, cfg_snap.ntp_server, sizeof(cfg_snap.ntp_server)) != 0) {
+        time_sync_restart_ntp(cfg_snap.ntp_server);
+    }
+#endif
 
     cJSON_Delete(j);
 

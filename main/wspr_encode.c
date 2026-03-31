@@ -22,7 +22,12 @@
 #include <ctype.h>
 #include <string.h>
 
+// MODIFIED: added for ESP_LOGW in wspr_encode() prefix fallback.
+#include "esp_log.h"
 #include "wspr_encode.h"
+
+// MODIFIED: log tag used only by the Type-2 prefix overflow warning in wspr_encode().
+static const char *TAG = "wspr_enc";
 
 // Sync vector (162 bits) -- unchanged from original.
 static const uint8_t SYNC[WSPR_SYMBOLS] = { 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
@@ -269,36 +274,27 @@ static void encode_and_interleave(const uint8_t msg[7], uint8_t symbols[WSPR_SYM
 //
 // WSPR Type-2 message: the 28-bit callsign field holds the base callsign
 // packed normally; the 15-bit locator field holds an encoded prefix or suffix.
-// The 7-bit power field holds: (power_code << 1) | type_flag, where type_flag=1
-// signals Type-2 to the decoder.
+// The 7-bit power field holds: (rounded_dBm/2)*2+1 (odd = Type-2/3 indicator).
 //
 // Per K1JT WSPR 2.0 Appendix B and the WSJT-X packjt.f90 source:
 //   For a PREFIX/callsign (e.g. PJ4/K1ABC):
-//     n_pfx = pack prefix chars into value using 37-symbol alphabet (up to 3 chars)
-//     n_loc = n_pfx * 22 + suffix_type_code   (22 = 2*11 possibilities for suffix)
-//             where suffix_type_code = 11 (no suffix) for PREFIX/ form
+//     n_pfx = pack prefix chars into value using 37-symbol alphabet (up to 3 chars,
+//             left-padded with spaces to exactly 3 chars for short prefixes)
+//     n_loc = n_pfx * 22 + 11   (11 = no-suffix marker in the 0..21 range)
+//     The result MUST fit in 15 bits (n_loc <= 32767).
+//     Maximum encodable n_pfx: (32767 - 11) / 22 = 1489.
+//
+//   returns -1 for prefixes that cannot be
+//   represented in the 15-bit field, forcing the caller to fall back to Type-1
+//   (which encodes the base callsign without the prefix/suffix) and log a warning.
+//   Suffix encoding (CALL/X form) is unaffected: n_loc = 0..125, always fits.
+//
 //   For callsign/SUFFIX (e.g. K1ABC/P, K1ABC/7, K1ABC/47):
 //     n_loc encodes the suffix type:
 //       single letter X:   n_loc = char_val(X)                 (0..25)
 //       single digit D:    n_loc = 26 + D                      (26..35)
-//       two digits DD:     n_loc = 26 + DD                     (26..99, DD=10..99)
-//       no suffix:         n_loc = 26 + 10 = 36 (treated as no-suffix marker)
-//     Then: n_loc = n_loc (the plain value above)
-//     For the prefix case: n_loc |= (n_pfx << something) -- see below.
-//
-// The actual WSJT-X encoding (from packjt.f90):
-//   If prefix/callsign: compute prefix as 3-char value (pad left with spaces),
-//     n_pfx = char(0)*37^2 + char(1)*37 + char(2)
-//     n_loc = n_pfx * 22 + 11     (11 = "no suffix" code in 0..21 range)
-//     n_call = pack base callsign normally
-//     n_pwr_out = (power_encoded << 1) | 1   (bit 0 = 1 = type 2)
-//   If callsign/suffix:
-//     suffix char X: ntype = char_wspr(X)    where single letter => 0..25
-//     suffix digit D: ntype = 26 + D         => 26..35
-//     suffix "dd": ntype = 26 + atoi(dd)    => 36..125 but clamped to 0..35 in practice
-//     n_loc = ntype
-//     n_call = pack base callsign normally
-//     n_pwr_out = (power_encoded << 1) | 1
+//       two digits DD:     n_loc = 26 + DD                     (26..99)
+//     These values are all << 32767, no overflow possible.
 //
 // References:
 //   K1JT WSPR 2.0 User's Guide, Appendix B
@@ -396,7 +392,15 @@ static int parse_compound_callsign(const char *cs, char base_call[8], char prefi
 }
 
 // Pack a compound callsign into 28-bit n_call and 15-bit n_loc for Type-2.
-// Also produces the 7-bit n_pwr_out = (power_code << 1) | 1.
+// Also produces the 7-bit n_pwr_out = (rounded_dBm/2)*2+1 (odd = Type-2 flag).
+//
+// 15-bit bounds check for the prefix path.
+// The WSPR Type-2 prefix encoding formula n_loc = n_pfx * 22 + 11 produces
+// values up to ~1,114,355 for arbitrary 3-char prefixes, which far exceeds the
+// 15-bit n_loc field capacity of pack_message() (max 32767).
+// return -1 if n_pfx * 22 + 11 > 32767 so the caller falls back to
+// Type-1 encoding with a truncated (base-only) callsign. The suffix path is
+// unaffected (n_loc = 0..125, always within 15-bit range).
 static int pack_callsign_type2(const char *cs, int power_dbm, uint32_t *n_call_out, uint32_t *n_loc_out, uint32_t *n_pwr_out) {
     char base_call[8], prefix[4], suffix[3];
     int has_prefix = 0, has_suffix = 0;
@@ -408,14 +412,10 @@ static int pack_callsign_type2(const char *cs, int power_dbm, uint32_t *n_call_o
     if (pack_callsign_type1(base_call, &n_call) < 0)
         return -1;
 
-    // Pack power -- note Type-2 uses (power_encoded << 1) | 1 in the 7-bit field.
+    // Pack power -- note Type-2 uses (rounded_dBm/2)*2+1 in the 7-bit field.
     uint32_t pwr_code = 0;
     pack_power(power_dbm, &pwr_code);
     // Type-2 power field: bit 0 = 1 (type indicator), bits 6:1 = power code.
-    // n_pwr value passed into pack_message must fit in 7 bits (0..127).
-    // pwr_code is in range 64..124 (dBm+64, max 60+64=124). Shifting left 1
-    // gives 128..248 which overflows 7 bits. WSJT-X instead stores the raw
-    // dBm value (0..60) OR'd with bit 0, keeping total <= 121 which fits in 7 bits.
     // Per packjt.f90: ntype = power_dbm; n_pwr = (ntype/2)*2 + 1 (makes it odd).
     // The rounded dBm is stored directly (not dBm+64) for Type-2/3.
     // WSPR spec: Type-2/3 power field must be ODD (bit 0 = 1) to signal
@@ -438,7 +438,27 @@ static int pack_callsign_type2(const char *cs, int power_dbm, uint32_t *n_call_o
             return -1;
         uint32_t n_pfx = (uint32_t)v0 * 37u * 37u + (uint32_t)v1 * 37u + (uint32_t)v2;
         // n_loc = n_pfx * 22 + 11  (11 = no-suffix marker in 0..21)
-        n_loc = n_pfx * 22u + 11u;
+        // check that n_loc fits in the 15-bit field used
+        // by pack_message() before assigning. pack_message() stores only bits 14:0
+        // of n_loc (via msg[3]|(msg[4]<<3)|(msg[5]>>5) = 15 bits total). Any n_pfx
+        // value producing n_loc > 32767 would be silently truncated, and because
+        // gcd(22, 32768) = 2 the truncation is non-invertible -- the decoder cannot
+        // recover the original prefix. Returning -1 here lets the caller fall back
+        // to Type-1 (transmitting the base callsign only) rather than sending a
+        // transmission that decodes to a wrong callsign at receiving stations.
+        // Practical implication: only prefixes with n_pfx <= 1489 are encodable.
+        // This covers certain short digit-only or low-alphabet-value prefixes.
+        // Most real-world amateur prefixes (e.g. "VE", "PJ4", "W", "K", "EA")
+        // produce n_pfx >> 1489 and cannot be encoded in WSPR Type-2.
+        // Users with such prefixes should use CALL/suffix form (CALL/P, CALL/M)
+        // which always fits in 15 bits (n_loc = 0..125).
+        uint32_t n_loc_candidate = n_pfx * 22u + 11u;
+        if (n_loc_candidate > 32767u) {
+            // Prefix value overflows 15-bit n_loc field -- encoding not possible.
+            // Caller must fall back to Type-1 or CALL/suffix form.
+            return -1;
+        }
+        n_loc = n_loc_candidate;
     } else {
         // Suffix packing.
         int suf_len = (int)strlen(suffix);
@@ -458,6 +478,7 @@ static int pack_callsign_type2(const char *cs, int power_dbm, uint32_t *n_call_o
         } else {
             ntype = 36; // no suffix (fallback)
         }
+        // Suffix n_loc values are always 0..125 -- safely within 15 bits.
         n_loc = (uint32_t)ntype;
     }
 
@@ -491,7 +512,7 @@ static uint32_t callsign_hash15(const char *cs) {
         else
             v = 36; // space, '/', or any other non-alphanumeric treated as space
         // Intentional uint32_t wrap modulo 2^32, exactly matching the
-        // WSJT-X packjt.f90 hash algorithm.  C11 §6.2.5p9 guarantees unsigned integer
+        // WSJT-X packjt.f90 hash algorithm.  C11 s6.2.5p9 guarantees unsigned integer
         // overflow wraps without undefined behaviour, ensuring interoperability with
         // all WSPR decoders.  For CALLSIGN_LEN=12 the accumulator wraps multiple times;
         // this is correct and intentional -- the fold below extracts the 15-bit hash.
@@ -507,30 +528,12 @@ static uint32_t callsign_hash15(const char *cs) {
 // Per WSJT-X packjt.f90 and K1JT Appendix B:
 // A 6-character Maidenhead locator AADDLL (AA=field, DD=square, LL=subsquare)
 // is packed into a 28-bit "callsign" field as:
-//   n_call = (179 - 10*(ord(A0)-ord('A')) - D0) * 180
-//           + (10*(ord(A1)-ord('A')) + D1)
-//   n_call = n_call * 24 + (ord(L0) - ord('A'))   [subsquare first letter, A..X]
-//   n_call = n_call * 24 + (ord(L1) - ord('A'))   [subsquare second letter, A..X]
-//   n_call = n_call * 128 + 64 + power_rounded
-//
-// Wait -- that last multiply bakes in power. Let's re-examine:
-// From etherkit/JTEncode source (wspr_encode Type-3 path):
-//   ng = 32768 + (179 - 10*(ord(g0)-'A') - (g2-'0')) * 180
-//            + (10*(ord(g1)-'A') + (g3-'0'))
-//   where g0,g1 are field chars, g2,g3 are square digits, g4,g5 are subsquare chars.
-//   nsubsq = (toupper(g4)-'A') * 24 + (toupper(g5)-'A')
-//   n_call = ng * 576 + nsubsq * 24 + ...
-// Re-reading WSJT-X more carefully:
-//   n1 = ng * 576 + (nsubsq * 24 ... wait this embeds power too)
-//
-// The correct formula from WSJT-X packjt.f90 (fortran, verified against JTEncode):
-//   ng = 32768 + (179 - 10*(ichar(g(1))-ichar('A')) - (ichar(g(3))-ichar('0'))) * 180
-//             + (10*(ichar(g(2))-ichar('A')) + (ichar(g(4))-ichar('0')))
-//   n_call = ng * 576 + (ichar(g(5))-ichar('a')) * 24 + (ichar(g(6))-ichar('a'))
+//   ng = 32768 + (179 - 10*(ord(A0)-ord('A')) - D0) * 180
+//             + (10*(ord(A1)-ord('A')) + D1)
+//   n_call = ng * 576 + (ord(L0) - ord('A')) * 24 + (ord(L1) - ord('A'))
 // The value 32768 is a flag that distinguishes Type-3 from a normal callsign in
 // the 28-bit field (normal max n_call for Type-1 is ~268M which is >> 32768,
-// but Type-3 uses a different range: 32768 + 0..180*180-1 = 32768..65167).
-// Then the subsquare adds 0..575, so n_call range is 32768..65742.
+// but Type-3 uses a different range: 32768 + 0..32399 + 0..575 = 32768..65742).
 // This fits in 17 bits, well within the 28-bit field.
 //
 // The 15-bit locator field holds the 15-bit hash of the callsign.
@@ -584,11 +587,22 @@ static int is_compound_callsign(const char *cs) {
 // ---------------------------------------------------------------------------
 
 //   1. Simple callsign + 4-char locator: produces Type-1 (unchanged behaviour).
-//   2. Compound callsign (contains '/'): produces Type-2.
+//   2. Compound callsign (contains '/'): attempts Type-2 encoding.
+//      If the prefix form overflows 15 bits, falls back to Type-1
+//      using the base callsign only and logs a warning.
 //      The caller must alternate with wspr_encode_type3() for full station ID.
 //   3. Simple callsign + 6-char locator: falls back to 4-char Type-1
 //      (truncates locator to 4 chars). The caller should alternate with
 //      wspr_encode_type3() to transmit the 6-char precision.
+//
+// MODIFIED: Added Type-1 fallback when compound callsign prefix overflows the
+// 15-bit WSPR locator field (n_pfx * 22 + 11 > 32767). All real-world national
+// amateur prefixes (VE, PJ4, W, OZ, GM, EA, 4X, ...) produce n_pfx values far
+// above the maximum encodable 1489, so PREFIX/CALL forms previously always
+// returned -1, silently producing no TX. The fix extracts the base callsign
+// from the compound form and transmits it as a standard Type-1 message.
+// wspr_encode_type() is also updated to return TYPE_1 for these cases so
+// wspr_transmit() does not attempt the invalid Type-2/3 alternation.
 int wspr_encode(const char *callsign, const char *locator, int power_dbm, uint8_t symbols[WSPR_SYMBOLS]) {
     if (!callsign || !locator)
         return -1;
@@ -596,15 +610,69 @@ int wspr_encode(const char *callsign, const char *locator, int power_dbm, uint8_
     // Route compound callsigns to Type-2 encoding.
     if (is_compound_callsign(callsign)) {
         uint32_t n_call = 0, n_loc = 0, n_pwr = 0;
-        if (pack_callsign_type2(callsign, power_dbm, &n_call, &n_loc, &n_pwr) < 0)
-            return -1;
-        uint8_t msg[7];
-        pack_message(n_call, n_loc, n_pwr, msg);
-        encode_and_interleave(msg, symbols);
-        return 0;
+        if (pack_callsign_type2(callsign, power_dbm, &n_call, &n_loc, &n_pwr) == 0) {
+            // Type-2 succeeded: suffix path (K1ABC/P, K1ABC/7) or rare short prefix.
+            uint8_t msg[7];
+            pack_message(n_call, n_loc, n_pwr, msg);
+            encode_and_interleave(msg, symbols);
+            return 0;
+        }
+
+        // MODIFIED: Type-2 failed because the prefix overflows the 15-bit n_loc field
+        // (n_pfx * 22 + 11 > 32767 for all real-world national amateur prefixes).
+        // Fall back to Type-1 using the base callsign extracted from the compound form.
+        // Extraction rule (matches WSJT-X heuristics):
+        //   PREFIX/CALL (after_len > before_len): base callsign is the part after '/'.
+        //   CALL/SUFFIX (after_len <= before_len): base callsign is the part before '/'.
+        const char *slash = NULL;
+        for (const char *p = callsign; *p; p++) {
+            if (*p == '/') { slash = p; break; }
+        }
+        const char *base_start = callsign;
+        int base_len = (int)strlen(callsign);
+        if (slash != NULL) {
+            int before = (int)(slash - callsign);
+            int after  = (int)strlen(slash + 1);
+            if (after > before) {
+                // PREFIX/CALL form: right side is the actual callsign.
+                base_start = slash + 1;
+                base_len   = after;
+            } else {
+                // CALL/SUFFIX form: left side is the actual callsign.
+                base_len = before;
+            }
+        }
+        // Copy base callsign; Type-1 accepts at most 6 characters.
+        char base_buf[7] = { 0 };
+        int copy_len = (base_len > 6) ? 6 : base_len;
+        for (int i = 0; i < copy_len; i++)
+            base_buf[i] = base_start[i];
+
+        // Attempt Type-1 encoding with the extracted base callsign.
+        if (pack_callsign_type1(base_buf, &n_call) == 0) {
+            char loc4[5];
+            size_t loc_len = strlen(locator);
+            if (loc_len >= 4) {
+                loc4[0] = locator[0]; loc4[1] = locator[1];
+                loc4[2] = locator[2]; loc4[3] = locator[3];
+                loc4[4] = '\0';
+                if (pack_locator4(loc4, &n_loc) == 0) {
+                    // MODIFIED: warn that prefix was dropped; TX proceeds as Type-1.
+                    ESP_LOGW(TAG, "Type-2 prefix overflow for '%s'; TX as Type-1 base callsign '%s'",
+                             callsign, base_buf);
+                    pack_power(power_dbm, &n_pwr);
+                    uint8_t msg[7];
+                    pack_message(n_call, n_loc, n_pwr, msg);
+                    encode_and_interleave(msg, symbols);
+                    return 0; // Type-1 fallback succeeded
+                }
+            }
+        }
+        // Both Type-2 and Type-1 fallback failed (malformed callsign or locator).
+        return -1;
     }
 
-    // Simple callsign path (Type-1 or Type-1 with truncated locator).
+    // Simple callsign path (Type-1 or Type-1 with truncated locator) -- unchanged.
     uint32_t n_call = 0, n_loc = 0, n_pwr = 0;
     if (pack_callsign_type1(callsign, &n_call) < 0)
         return -1;
@@ -634,11 +702,29 @@ int wspr_encode(const char *callsign, const char *locator, int power_dbm, uint8_
 }
 
 // Determine the WSPR message type for a given callsign + locator pair.
+//
+// MODIFIED: Added overflow detection for compound callsigns. When Type-2 prefix
+// encoding would fail (pack_callsign_type2 returns -1 due to n_pfx*22+11>32767),
+// returns TYPE_1 instead of TYPE_2. This prevents wspr_transmit() from scheduling
+// a Type-3 companion for a primary slot that wspr_encode() would transmit as Type-1,
+// which would create an invalid Type-3 with no matching Type-2 counterpart.
 wspr_msg_type_t wspr_encode_type(const char *callsign, const char *locator) {
     if (!callsign || !locator)
         return WSPR_MSG_TYPE_1; // default safe return
-    if (is_compound_callsign(callsign))
-        return WSPR_MSG_TYPE_2;
+    if (is_compound_callsign(callsign)) {
+        // MODIFIED: probe Type-2 encoding to detect prefix overflow before committing.
+        // Power=20 dBm is a valid dummy value; power does not affect the n_loc
+        // overflow check -- only n_pfx * 22 + 11 > 32767 determines the result.
+        // If Type-2 succeeds, return TYPE_2 for normal alternation.
+        // If Type-2 fails (prefix overflow), return TYPE_1 to signal that
+        // wspr_encode() will fall back to Type-1, so wspr_transmit() skips the
+        // Type-2/3 alternation entirely and transmits a plain Type-1 frame.
+        uint32_t nc = 0, nl = 0, np = 0;
+        if (pack_callsign_type2(callsign, 20, &nc, &nl, &np) == 0)
+            return WSPR_MSG_TYPE_2; // Type-2 encodable: CALL/SUFFIX or rare short prefix
+        // MODIFIED: prefix overflows; wspr_encode() will use Type-1 fallback.
+        return WSPR_MSG_TYPE_1;
+    }
     if (strlen(locator) >= 6)
         return WSPR_MSG_TYPE_3; // simple callsign + 6-char locator -> needs Type-1 + Type-3
     return WSPR_MSG_TYPE_1;

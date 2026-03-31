@@ -143,7 +143,7 @@ esp_err_t oscillator_set_freq(uint32_t freq_hz);
  *
  * @return @c ESP_OK on success, or an error code on driver failure.
  */
-esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz); // [FIX #11] renamed from offset_mhz
+esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz);
 
 /**
  * @brief Enable or disable the RF output of the oscillator.

@@ -20,6 +20,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h> // MODIFIED (Bug 6): setenv() / tzset() for GPS UTC timezone init
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
@@ -45,18 +46,22 @@
 
 static const char *TAG = "wspr_main";
 
-// WSPR timing constants
-// Each symbol lasts 8192/12000 s ~= 682.667 ms
-// Tone spacing = 12000/8192 Hz ~= 1.4648 Hz
-// Total TX time = 162 x 682.667 ms ~= 110.6 s
-#define WSPR_SYMBOL_MS 683 // ms per symbol (rounded)
-
 // Exact WSPR tone spacing: 12000/8192 Hz = 375/256 Hz = 1464.84375 Hz.
 // Expressed as integer numerator/denominator in milli-Hz * 256 to avoid float.
 // symbol * 375000 / 256 gives mHz offset; max = 3*375000/256 = 4394 mHz.
 // Only 32-bit multiply and divide needed; no 64-bit ops, no float.
 #define WSPR_TONE_NUM 375000UL // tone numerator: spacing_mHz * 256
 #define WSPR_TONE_DEN 256UL    // tone denominator
+
+// [FIXED] Exact WSPR symbol period timing using 3x scaling trick.
+// The exact symbol period is 8192/12000 s = 682666.666... us (repeating).
+// Rounding to 682667 introduced +0.333 us per symbol = +54 us accumulated drift
+// over 162 symbols, causing late symbol boundaries (monotonic positive bias).
+// Fix: multiply both target and elapsed by 3:
+//   3 x (8192/12000 x 1e6) = 2048000.000 us exactly (no rounding error).
+// Overflow proof: 162 x 2048000 = 331,776,000 < 2^32 (safe in uint32_t).
+//                 max_elapsed x 3 = 110,600,000 x 3 = 331,800,000 < 2^32 (safe).
+#define WSPR_PERIOD_3X_US 2048000UL // 3 x exact symbol period in microseconds
 
 // Global live config
 static wspr_config_t g_cfg;
@@ -75,6 +80,19 @@ static int g_hop_ptr = 0;
 // TX state (updated for web status)
 static volatile bool g_tx_active = false;
 static volatile int g_symbol_idx = 0;
+
+// [MODIFIED - BUG 4 FIX] Pre-arm state shared between scheduler_task and wspr_transmit().
+// Set to true by the scheduler when phase==0 pre-arming is completed successfully.
+// Read by wspr_transmit() to skip oscillator_set_freq(), gpio_filter_select(), and
+// vTaskDelay() -- all of which were executed during phase==0 already, before phase==1.
+// Written and read only from scheduler_task (which calls wspr_transmit() directly),
+// so no mutex is needed.
+static bool g_pre_armed = false;
+
+// [MODIFIED - BUG 4 FIX] Pre-armed base frequency, set by the scheduler during phase==0.
+// wspr_transmit() uses this value directly when g_pre_armed is true, avoiding a
+// redundant oscillator_set_freq() call that would take ~2 ms and reset the PLL.
+static uint32_t g_pre_arm_base_hz = 0;
 
 static const char *reset_reason_to_str(esp_reset_reason_t r) {
     switch (r) {
@@ -167,12 +185,13 @@ static void wspr_transmit(void) {
 
     // Guard against empty callsign or locator before encoding.
     // wspr_encode_type() returns WSPR_MSG_TYPE_1 for NULL inputs which misleads
-    // the caller into calling wspr_encode() — that call would then fail with
+    // the caller into calling wspr_encode() -- that call would then fail with
     // enc_result=-1 and produce a confusing "encode failed" error message.
     // Catching empty strings here gives a clear log and exits cleanly without
     // wasting the encode cycle or the TX time slot.
     if (snap_callsign[0] == '\0' || snap_locator[0] == '\0') {
         ESP_LOGE(TAG, "TX skipped: callsign or locator is empty");
+        g_pre_armed = false; // [MODIFIED - BUG 4 FIX] clear pre-arm on early exit
         return;
     }
 
@@ -228,23 +247,41 @@ static void wspr_transmit(void) {
                  "compound callsign: PREFIX/CALL or CALL/SUFFIX (e.g. PJ4/K1ABC, K1ABC/P); "
                  "locator: 4 chars (AA00, e.g. GF05) or 6 chars (AA00AA, e.g. GF05aa)",
                  snap_callsign, snap_locator);
+        g_pre_armed = false; // [MODIFIED - BUG 4 FIX] clear pre-arm on encode failure
         return;
     }
 
-    // Use snap_region (captured under mutex above) instead of the
-    // unlocked g_cfg.iaru_region read that was here previously.
-    // base_hz computed before the filter switch; oscillator_set_freq()
-    // pre-programs the correct band frequency with RF output still off so
-    // the relay never routes a stale previous-band signal through the new
-    // filter passband.  vTaskDelay after gpio_filter_select() lets
-    // relay contacts settle before the oscillator output is enabled.
-    uint32_t base_hz = config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx) + 1500u;
-    oscillator_set_freq(base_hz);
-    gpio_filter_select(BAND_FILTER[g_band_idx]);
-    // WSPR_LPF_SETTLE_MS: settle time driven by Kconfig
-    //  instead of the previous hard-coded 10 ms constant.
-    //  Mechanical relays typically need 5-20 ms; solid-state relays 1-5 ms.
-    vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
+    // [MODIFIED - BUG 4 FIX] Compute base_hz from the pre-arm snapshot if available,
+    // otherwise compute it fresh. The base_hz must be consistent between the
+    // pre-arm oscillator_set_freq() call and the per-symbol oscillator_set_freq_mhz() calls.
+    // When pre-armed: g_pre_arm_base_hz was set by the scheduler during phase==0
+    // using the same snap_region / g_band_idx values visible here, so we reuse it.
+    // When not pre-armed: compute from snap_region as before.
+    uint32_t base_hz;
+    if (g_pre_armed) {
+        // Reuse the frequency programmed into the oscillator during phase==0.
+        base_hz = g_pre_arm_base_hz;
+    } else {
+        // Not pre-armed: compute and program the oscillator now (original path).
+        // Use snap_region (captured under mutex above) instead of the
+        // unlocked g_cfg.iaru_region read that was here previously.
+        // base_hz computed before the filter switch; oscillator_set_freq()
+        // pre-programs the correct band frequency with RF output still off so
+        // the relay never routes a stale previous-band signal through the new
+        // filter passband.  vTaskDelay after gpio_filter_select() lets
+        // relay contacts settle before the oscillator output is enabled.
+        base_hz = config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx) + 1500u;
+        oscillator_set_freq(base_hz);
+        gpio_filter_select(BAND_FILTER[g_band_idx]);
+        // WSPR_LPF_SETTLE_MS: settle time driven by Kconfig
+        //  instead of the previous hard-coded 10 ms constant.
+        //  Mechanical relays typically need 5-20 ms; solid-state relays 1-5 ms.
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
+    }
+    // [MODIFIED - BUG 4 FIX] Clear pre-arm flag now that it has been consumed.
+    // Must be cleared before the TX loop so a subsequent call (after TX completes)
+    // does not inadvertently reuse a stale pre-arm state from the previous cycle.
+    g_pre_armed = false;
 
     oscillator_enable(true);
     g_tx_active = true;
@@ -261,8 +298,10 @@ static void wspr_transmit(void) {
     // stack is 8 KiB; this value confirms how much headroom remains at TX entry.
     // Also log message type and slot parity for Type-2/3 diagnosis.
     // Use snap_region for the log line as well (was g_cfg.iaru_region).
-    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
+    // [MODIFIED - BUG 4 FIX] Also log whether pre-arm was used for diagnostics.
+    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d pre_armed=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
              (unsigned long)config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)snap_parity,
+             (int)(g_pre_arm_base_hz != 0), // log whether pre-arm path was taken
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
@@ -285,21 +324,31 @@ static void wspr_transmit(void) {
 
         oscillator_set_freq_mhz(base_hz, tone_offset_millihz);
 
-        uint32_t target_us = (uint32_t)(i + 1) * 682667UL;
+        // [FIXED] Use exact 3x-scaled rational timing to eliminate 54 us accumulated drift.
+        // Old code: target_us = (i+1) * 682667 -- +0.333 us/symbol error, +54 us total.
+        // New code: target_x3 = (i+1) * 2048000 -- 3 x 682666.666... = 2048000 exactly.
+        // Both target and elapsed are multiplied by 3 so the comparison is dimensionally
+        // consistent. The factor of 3 cancels in the inequality; no loss of precision.
+        uint32_t target_x3 = (uint32_t)(i + 1) * WSPR_PERIOD_3X_US;
         for (;;) {
             // Explicit mask matches tx_start_us; see comment there.
             uint32_t elapsed = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL) - tx_start_us;
-            if (elapsed >= target_us)
+            // Multiply elapsed by 3 to match the 3x-scaled target.
+            // max elapsed*3 = 110,600,000*3 = 331,800,000 < 2^32: no overflow.
+            if (elapsed * 3UL >= target_x3)
                 break;
-            uint32_t rem = target_us - elapsed;
-            if (rem > 10000u) {
-                uint32_t sleep_ms = rem / 1000u;
+            uint32_t rem_x3 = target_x3 - elapsed * 3UL;
+            // Convert 3x remainder back to microseconds (round down = conservative,
+            // prevents sleeping past the deadline).
+            uint32_t rem_us = rem_x3 / 3UL;
+            if (rem_us > 10000u) {
+                uint32_t sleep_ms = rem_us / 1000u;
                 if (sleep_ms > 5u)
                     sleep_ms -= 5u;
                 else
                     sleep_ms = 1u;
                 vTaskDelay(pdMS_TO_TICKS(sleep_ms));
-            } else if (rem > 1000u) {
+            } else if (rem_us > 1000u) {
                 vTaskDelay(1);
             } else {
                 taskYIELD();
@@ -310,13 +359,19 @@ static void wspr_transmit(void) {
         // at symbol boundary exceeds the ideal deadline by more than 10 ms.
         // Overruns indicate scheduler jitter or ISR load that may cause audible
         // frequency discontinuities; useful during initial hardware calibration.
+        // [FIXED] Compute the equivalent plain-us deadline for the overrun log only:
+        //   ideal_us = target_x3 / 3 = (i+1) * 682666 (truncated, conservative).
+        // The overrun check uses this reconstructed value; it is only for logging
+        // and does not affect the timing loop above.
 #if CONFIG_WSPR_SYMBOL_OVERRUN_LOG
         {
             // Explicit mask for consistency with tx_start_us narrowing.
             uint32_t actual_us = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL) - tx_start_us;
-            if (actual_us > target_us + 10000u) {
-                ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lu actual=%lu overrun=%lu us", i, (unsigned long)target_us, (unsigned long)actual_us,
-                         (unsigned long)(actual_us - target_us));
+            // Reconstruct plain-us deadline for log message (truncated / 3).
+            uint32_t deadline_us = target_x3 / 3UL;
+            if (actual_us > deadline_us + 10000u) {
+                ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lu actual=%lu overrun=%lu us", i, (unsigned long)deadline_us, (unsigned long)actual_us,
+                         (unsigned long)(actual_us - deadline_us));
             }
         }
 #endif
@@ -474,30 +529,96 @@ static void scheduler_task(void *arg) {
                 }
             }
 
-            for (;;) {
-                struct timeval tv;
-                gettimeofday(&tv, NULL);
-                uint32_t phase = (uint32_t)(tv.tv_sec % 120u);
-                // TX starts at phase=3 at the latest: 3 + 110.6 s = 113.6 s,
-                // leaving 6.4 s before the 120 s slot boundary. This prevents
-                // the last symbols from overflowing into the next decode window.
-                // Matches the window in time_sync_secs_to_next_tx().
-                if (phase >= 1u && phase <= 3u)
-                    break;
-
-                vTaskDelay(pdMS_TO_TICKS(10));
-                // feed WDT inside fine-grained phase-check loop;
-                // this loop runs for up to ~3 s in 10 ms steps.
-#if CONFIG_WSPR_TASK_WDT_ENABLE
-                esp_task_wdt_reset();
-#endif
+            // [MODIFIED - BUG 4 FIX] Fine-grained phase-check loop with phase==0 pre-arm.
+            // Original: waited for phase in [1,3], then wspr_transmit() spent ~12 ms
+            // on oscillator_set_freq() + gpio_filter_select() + vTaskDelay(settle) before
+            // enabling RF output. At worst case (phase=3 when loop exits), the first symbol
+            // fired at phase ~3.013, missing the protocol deadline by over 2 seconds.
+            //
+            // Fix: at phase==0 (the second immediately before the TX window), pre-arm the
+            // oscillator and filter relay with RF output muted. The relay settle time
+            // (CONFIG_WSPR_LPF_SETTLE_MS, default 10 ms) elapses entirely within the
+            // ~980 ms remaining in phase==0. At phase==1 we enter wspr_transmit() which
+            // skips setup and calls oscillator_enable(true) immediately, reducing the
+            // first-symbol latency to a single I2C write (~0.25 ms) instead of ~12 ms.
+            //
+            // Pre-arm state is communicated via module-level g_pre_armed and
+            // g_pre_arm_base_hz so wspr_transmit()'s signature is unchanged.
+            {
+                // [MODIFIED - BUG 4 FIX] Capture snap_region once for pre-arm freq computation.
+                // This mirrors the pattern in wspr_transmit(); both must agree on the region.
                 web_server_cfg_lock();
-                bool still_en = g_cfg.tx_enabled;
+                uint8_t pre_snap_region = g_cfg.iaru_region;
                 web_server_cfg_unlock();
 
-                if (!still_en) {
-                    do_skip = true;
-                    break;
+                // [MODIFIED - BUG 4 FIX] pre_armed tracks whether phase==0 arm occurred.
+                bool pre_armed_local = false;
+
+                for (;;) {
+                    struct timeval tv;
+                    gettimeofday(&tv, NULL);
+                    uint32_t phase = (uint32_t)(tv.tv_sec % 120u);
+
+                    // [MODIFIED - BUG 4 FIX] At phase==0: program oscillator and select
+                    // filter relay with RF output still muted. This moves the ~2 ms
+                    // oscillator setup and ~10 ms relay settle entirely out of the TX
+                    // window into the preceding second, so phase==1 entry is instant.
+                    // g_band_idx is read without a lock (volatile int); it is written only
+                    // by select_next_band() which runs in this same task, so the read is safe.
+                    if (phase == 0u && !pre_armed_local) {
+                        // Compute the base frequency for the upcoming transmission.
+                        // +1500 Hz is the WSPR audio centre offset (same as in wspr_transmit).
+                        g_pre_arm_base_hz = config_band_freq_hz(
+                            (iaru_region_t)pre_snap_region,
+                            (wspr_band_t)g_band_idx) + 1500u;
+                        // Program the oscillator (RF output remains muted: oscillator_enable
+                        // has not been called with true). For Si5351 this runs si_cache_band()
+                        // (~8 I2C writes, ~2 ms). For AD9850 this writes the frequency word.
+                        oscillator_set_freq(g_pre_arm_base_hz);
+                        // Select the correct LPF relay. Relay contacts settle within
+                        // CONFIG_WSPR_LPF_SETTLE_MS ms, which must complete before phase==1.
+                        // At 10 ms settle (default) the arm happens any time during the
+                        // ~980 ms remaining in phase==0, leaving >970 ms for settling.
+                        gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
+                        // No vTaskDelay here: relay settles during the remainder of phase==0.
+                        // wspr_transmit() will skip oscillator_set_freq(), gpio_filter_select(),
+                        // and vTaskDelay() because g_pre_armed will be true.
+                        g_pre_armed = true;
+                        pre_armed_local = true;
+                        ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)",
+                                 BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
+                    }
+
+                    // TX starts at phase==1 (original protocol deadline).
+                    // The original code allowed phase up to 3; we tighten to exactly 1
+                    // because the pre-arm means setup is already done. Accepting phase==2
+                    // or 3 as fallback (e.g. if phase==1 was missed due to task latency)
+                    // is retained for robustness: if the scheduler was delayed past phase==1
+                    // we still transmit rather than silently drop the slot.
+                    // Matches the original window in time_sync_secs_to_next_tx().
+                    if (phase >= 1u && phase <= 3u)
+                        break;
+
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    // feed WDT inside fine-grained phase-check loop;
+                    // this loop runs for up to ~3 s in 10 ms steps.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                    esp_task_wdt_reset();
+#endif
+                    web_server_cfg_lock();
+                    bool still_en = g_cfg.tx_enabled;
+                    web_server_cfg_unlock();
+
+                    if (!still_en) {
+                        // [MODIFIED - BUG 4 FIX] Clear pre-arm state if TX is disabled
+                        // mid-wait. The oscillator was already programmed; leaving
+                        // g_pre_armed true would cause wspr_transmit() to skip setup on
+                        // a future slot with potentially a different band/frequency.
+                        g_pre_armed = false;
+                        g_pre_arm_base_hz = 0;
+                        do_skip = true;
+                        break;
+                    }
                 }
             }
         }
@@ -531,6 +652,28 @@ static void scheduler_task(void *arg) {
                 // cycles the cached list is reused and only the pointer is advanced.
                 select_next_band(do_hop, need_rebuild || g_band_idx < 0);
                 last_hop_ts = now;
+                // [MODIFIED - BUG 4 FIX] If the band changed after the pre-arm (unlikely
+                // but possible if hop fires exactly at phase==0..1 boundary), invalidate
+                // the pre-arm so wspr_transmit() uses the freshly selected band instead
+                // of the one programmed during phase==0.
+                if (g_pre_armed) {
+                    web_server_cfg_lock();
+                    uint8_t new_region = g_cfg.iaru_region;
+                    web_server_cfg_unlock();
+                    uint32_t new_base_hz = config_band_freq_hz(
+                        (iaru_region_t)new_region,
+                        (wspr_band_t)g_band_idx) + 1500u;
+                    if (new_base_hz != g_pre_arm_base_hz) {
+                        // Band changed after pre-arm: re-arm immediately for new band.
+                        g_pre_arm_base_hz = new_base_hz;
+                        oscillator_set_freq(g_pre_arm_base_hz);
+                        gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
+                        // Brief settle: still in pre-TX window, so this is safe.
+                        vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
+                        ESP_LOGD(TAG, "Re-armed after hop: band=%s base_hz=%lu",
+                                 BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
+                    }
+                }
             }
 
             // Duty cycle control: Bresenham-style accumulator avoids the integer
@@ -549,6 +692,12 @@ static void scheduler_task(void *arg) {
             }
             if (!do_tx) {
                 ESP_LOGI(TAG, "Duty cycle skip (pct=%u accum=%u)", (unsigned)duty, (unsigned)s_duty_accum);
+                // [MODIFIED - BUG 4 FIX] Clear pre-arm state when duty-cycle skip is taken.
+                // The oscillator was pre-programmed during phase==0 but TX will not happen
+                // this cycle; g_pre_armed must be false before the next cycle so the next
+                // slot's pre-arm is not incorrectly skipped.
+                g_pre_armed = false;
+                g_pre_arm_base_hz = 0;
                 do_skip = true;
             }
 
@@ -570,6 +719,19 @@ static void scheduler_task(void *arg) {
 }
 
 void app_main(void) {
+    // MODIFIED (Bug 6): Force UTC timezone at the earliest possible point in app_main(),
+    // before any subsystem that might call mktime() is initialised.
+    // GPS NMEA sentences always carry UTC time; mktime() must interpret them as UTC.
+    // Placing this here (rather than inside time_sync_init()) guarantees correctness
+    // even if a future library, driver, or FreeRTOS timer callback calls mktime()
+    // before time_sync_init() runs -- which would silently corrupt GPS timestamps by
+    // the local UTC offset. The matching setenv/tzset inside time_sync_init() is kept
+    // as a redundant safety guard (belt-and-suspenders).
+#if defined(CONFIG_WSPR_TIME_GPS)
+    setenv("TZ", "UTC0", 1);
+    tzset();
+#endif
+
     // esp_log_timestamp() returns uint32_t ms since boot (no __divdi3 call needed).
     // Dividing uint32_t ms by 1000u uses 32-bit integer division only.
     g_boot_uptime_sec = (uint32_t)(esp_log_timestamp() / 1000u);

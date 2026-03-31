@@ -60,6 +60,19 @@ esp_err_t time_sync_init(const char *ntp_server) {
     return ESP_OK;
 }
 
+// MODIFIED (Bug 7): apply a new NTP server hostname at runtime without rebooting.
+// Stops the running SNTP client, updates the server name, and restarts polling.
+// Called from h_post_config() in web_server.c when the NTP server field changes.
+// The _synced flag is intentionally NOT cleared: the system clock is already
+// valid; only the polling target changes. A new sync will be performed on the
+// next SNTP poll interval using the updated server.
+void time_sync_restart_ntp(const char *ntp_server) {
+    esp_sntp_stop();
+    esp_sntp_setservername(0, ntp_server ? ntp_server : "pool.ntp.org");
+    esp_sntp_init();
+    ESP_LOGI(TAG, "NTP restarted: server=%s", ntp_server ? ntp_server : "pool.ntp.org");
+}
+
 // =============================================================================
 //  GPS (NMEA UART) implementation
 // =============================================================================
