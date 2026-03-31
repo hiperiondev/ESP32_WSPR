@@ -279,9 +279,11 @@ char *wifi_manager_scan(void) {
         return empty;
     }
 
-    // Cap at 20 results to keep the JSON payload small enough for the HTTP stack.
-    if (count > 20) {
-        count = 20;
+    // Fetch up to 30 records so the hidden-SSID filter below has spare
+    // capacity to find 20 visible networks even when some returned records are hidden.
+    // The visible cap stays at 20 after filtering to keep the HTTP payload manageable.
+    if (count > 30) {
+        count = 30;
     }
 
     wifi_ap_record_t *records = malloc(sizeof(wifi_ap_record_t) * count);
@@ -293,6 +295,24 @@ char *wifi_manager_scan(void) {
     }
 
     esp_wifi_scan_get_ap_records(&count, records);
+
+    // Filter out hidden networks (empty SSID) before applying the 20-AP cap.
+    // Hidden SSIDs cannot be selected from the web UI and waste slots in the visible list.
+    // In dense environments this ensures the user's target AP is not pushed out of the list.
+    // Records arrive sorted by RSSI (strongest first) from the driver, so filtering in-place
+    // compactly preserves that ordering without a separate sort step.
+    {
+        uint16_t visible = 0;
+        for (uint16_t fi = 0; fi < count; fi++) {
+            if (records[fi].ssid[0] != '\0') {
+                if (fi != visible)
+                    records[visible] = records[fi];
+                visible++;
+            }
+        }
+        // Cap visible results at 20 for HTTP payload size.
+        count = (visible > 20u) ? 20u : visible;
+    }
 
     // Restore the original WiFi mode before building the response.
     if (elevated) {

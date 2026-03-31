@@ -103,7 +103,14 @@ static esp_err_t si_init_pll(void) {
         return ESP_ERR_INVALID_ARG;
     }
     uint32_t xtal_mhz = _si_xtal / 1000000UL;
-    uint32_t a = 900UL / xtal_mhz;
+    // Target 875 MHz instead of 900 MHz (Si5351A VCO absolute max per AN619).
+    // Operating at exactly 900 MHz means a crystal running even slightly fast, or any
+    // temperature-induced VCO gain shift, can push the VCO above spec, increasing the
+    // probability of PLL loss-of-lock.  875 MHz gives a comfortable 2.8 % safety margin.
+    // For 25 MHz xtal: a = 35, VCO = 875 MHz.  For 27 MHz xtal: a = 32, VCO = 864 MHz.
+    // Frequency resolution impact is negligible for WSPR (PLL step ~23 mHz, far below
+    // the 1465 mHz WSPR tone spacing).
+    uint32_t a = 875UL / xtal_mhz;
     if (a < 15UL)
         a = 15UL;
     if (a > 90UL)

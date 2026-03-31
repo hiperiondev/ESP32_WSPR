@@ -249,7 +249,12 @@ static void wspr_transmit(void) {
     oscillator_enable(true);
     g_tx_active = true;
 
-    uint32_t tx_start_us = (uint32_t)esp_timer_get_time();
+    // [Use explicit 64-bit mask when narrowing esp_timer_get_time() to uint32_t.
+    // This documents the intentional truncation and mirrors the pattern already used in
+    // the scheduler for the hop timestamp. uint32_t subtraction (current - start) is
+    // correct by C11 §6.2.5p9 (unsigned wrap is defined) for any TX window < 4294 s.
+    // The WSPR TX window is 110 s, well within that bound; no timing corruption possible.
+    uint32_t tx_start_us = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL);
 
     // log stack high-watermark at TX start to help diagnose
     // stack overflows during the ~110 s transmission window.  The scheduler_task
@@ -282,7 +287,8 @@ static void wspr_transmit(void) {
 
         uint32_t target_us = (uint32_t)(i + 1) * 682667UL;
         for (;;) {
-            uint32_t elapsed = (uint32_t)esp_timer_get_time() - tx_start_us;
+            // Explicit mask matches tx_start_us; see comment there.
+            uint32_t elapsed = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL) - tx_start_us;
             if (elapsed >= target_us)
                 break;
             uint32_t rem = target_us - elapsed;
@@ -306,7 +312,8 @@ static void wspr_transmit(void) {
         // frequency discontinuities; useful during initial hardware calibration.
 #if CONFIG_WSPR_SYMBOL_OVERRUN_LOG
         {
-            uint32_t actual_us = (uint32_t)esp_timer_get_time() - tx_start_us;
+            // Explicit mask for consistency with tx_start_us narrowing.
+            uint32_t actual_us = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL) - tx_start_us;
             if (actual_us > target_us + 10000u) {
                 ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lu actual=%lu overrun=%lu us", i, (unsigned long)target_us, (unsigned long)actual_us,
                          (unsigned long)(actual_us - target_us));

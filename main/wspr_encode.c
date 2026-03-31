@@ -418,6 +418,12 @@ static int pack_callsign_type2(const char *cs, int power_dbm, uint32_t *n_call_o
     // dBm value (0..60) OR'd with bit 0, keeping total <= 121 which fits in 7 bits.
     // Per packjt.f90: ntype = power_dbm; n_pwr = (ntype/2)*2 + 1 (makes it odd).
     // The rounded dBm is stored directly (not dBm+64) for Type-2/3.
+    // WSPR spec: Type-2/3 power field must be ODD (bit 0 = 1) to signal
+    // the message type to the decoder.  (rounded_dbm / 2) * 2 rounds down to the
+    // nearest even integer; adding 1 makes it odd.  For all valid WSPR power levels
+    // (0,3,7,10,...,60) C integer division truncates toward zero which equals floor
+    // for non-negative values, so the formula is correct for every valid level.
+    // Example: 10 dBm -> (10/2)*2+1 = 11; 20 dBm -> (20/2)*2+1 = 21.  Both odd.
     int rounded_dbm = (int)(pwr_code)-64;                   // recover rounded dBm from pwr_code
     uint32_t n_pwr = (uint32_t)((rounded_dbm / 2) * 2 + 1); // odd = Type-2/3 flag
 
@@ -484,6 +490,11 @@ static uint32_t callsign_hash15(const char *cs) {
             v = (c - 'A') + 10;
         else
             v = 36; // space, '/', or any other non-alphanumeric treated as space
+        // Intentional uint32_t wrap modulo 2^32, exactly matching the
+        // WSJT-X packjt.f90 hash algorithm.  C11 §6.2.5p9 guarantees unsigned integer
+        // overflow wraps without undefined behaviour, ensuring interoperability with
+        // all WSPR decoders.  For CALLSIGN_LEN=12 the accumulator wraps multiple times;
+        // this is correct and intentional -- the fold below extracts the 15-bit hash.
         n = n * 37u + (uint32_t)v;
     }
     // Fold to 15 bits: XOR upper and lower halves then mask.
@@ -650,6 +661,10 @@ int wspr_encode_type3(const char *callsign, const char *locator, int power_dbm, 
     uint32_t n_loc = callsign_hash15(callsign);
 
     // 7-bit power field: (rounded_dBm/2)*2 + 1  (odd = Type-2/3 flag).
+    // WSPR spec: Type-2/3 power field must be ODD (bit 0 = 1) to signal
+    // message type to the decoder.  (rounded_dbm / 2) * 2 rounds down to the nearest
+    // even integer; adding 1 makes it odd.  For all valid WSPR levels (0,3,7,...,60)
+    // this is correct and the result fits in 7 bits (max 60 -> result = 61).
     uint32_t pwr_code = 0;
     pack_power(power_dbm, &pwr_code);
     int rounded_dbm = (int)pwr_code - 64;

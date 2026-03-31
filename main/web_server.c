@@ -657,6 +657,10 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     cJSON_AddStringToObject(j, "wifi_ssid", _cfg->wifi_ssid);
     cJSON_AddBoolToObject(j, "has_pass", _cfg->wifi_pass[0] != '\0');
     cJSON_AddStringToObject(j, "ntp_server", _cfg->ntp_server);
+    // The JS loadCfg() reads cfg.hop_enabled to restore the toggle on page load.
+    // Without this field the toggle always appeared unchecked after reboot/restart
+    // even though the value was correctly persisted in NVS and loaded into g_cfg.
+    cJSON_AddBoolToObject(j, "hop_enabled", _cfg->hop_enabled);
     char _hop_str[16];
     snprintf(_hop_str, sizeof(_hop_str), "%lu", (unsigned long)_cfg->hop_interval_sec);
     cJSON_AddRawToObject(j, "hop_interval_sec", _hop_str);
