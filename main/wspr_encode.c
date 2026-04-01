@@ -719,19 +719,25 @@ static uint32_t callsign_hash15(const char *cs) {
     uint32_t n = 0;
     for (int i = 0; cs[i] != '\0'; i++) {
         char c = toupper((unsigned char)cs[i]);
-        int v;
+        uint32_t v;
         if (c >= '0' && c <= '9')
-            v = c - '0';
+            v = (uint32_t)(c - '0');
         else if (c >= 'A' && c <= 'Z')
-            v = (c - 'A') + 10;
+            v = (uint32_t)(c - 'A') + 10u;
         else
             v = 36; // space or any other character
 
-        // Polynomial accumulation over the 37-value WSPR alphabet
-        n = n * 37u + (uint32_t)v;
+        // Mask to 30 bits after each multiply-accumulate step.
+        // The XOR fold below uses only bits [14:0] and [29:15] of n, so
+        // bits above bit 29 never affect the result. Reducing mod 2^30 here
+        // prevents the 32-bit overflow that corrupts hashes for callsigns
+        // longer than 6 characters (37^7 > UINT32_MAX).
+        n = (n * 37u + v) & 0x3FFFFFFFu;
     }
 
-    // Fold: XOR upper 15 bits with lower 15 bits, then mask to 15 bits
+    // Fold upper 15 bits (bits [29:15]) XOR lower 15 bits (bits [14:0]),
+    // then mask to 15 bits. Identical to the K1JT 64-bit reference result
+    // because we preserved all 30 bits that this fold depends on.
     return ((n >> 15) ^ n) & 0x7FFFu;
 }
 
