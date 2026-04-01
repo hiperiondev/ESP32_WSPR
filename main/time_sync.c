@@ -60,15 +60,11 @@ esp_err_t time_sync_init(const char *ntp_server) {
     return ESP_OK;
 }
 
-// MODIFIED (Bug 7): apply a new NTP server hostname at runtime without rebooting.
-// Stops the running SNTP client, updates the server name, and restarts polling.
-// Called from h_post_config() in web_server.c when the NTP server field changes.
-// The _synced flag is intentionally NOT cleared: the system clock is already
-// valid; only the polling target changes. A new sync will be performed on the
-// next SNTP poll interval using the updated server.
 void time_sync_restart_ntp(const char *ntp_server) {
     esp_sntp_stop();
     esp_sntp_setservername(0, ntp_server ? ntp_server : "pool.ntp.org");
+    // Re-register callback -- esp_sntp_init() may clear it on some IDF versions.
+    sntp_set_time_sync_notification_cb(sntp_cb);
     esp_sntp_init();
     ESP_LOGI(TAG, "NTP restarted: server=%s", ntp_server ? ntp_server : "pool.ntp.org");
 }
@@ -87,32 +83,18 @@ void time_sync_restart_ntp(const char *ntp_server) {
 
 static TaskHandle_t _gps_task = NULL;
 
-// PPS GPIO ISR support. When CONFIG_GPS_PPS_GPIO is set to a
-// valid GPIO number (>= 0), a rising-edge ISR snaps the system clock sub-second
-// part to zero on each PPS pulse. This gives microsecond-level accuracy compared
-// to the ~10 ms jitter of pure NMEA sentence parsing via UART polling.
-// Set CONFIG_GPS_PPS_GPIO = -1 (Kconfig default) to disable PPS entirely.
 #if defined(CONFIG_GPS_PPS_GPIO) && (CONFIG_GPS_PPS_GPIO >= 0)
 #define GPS_PPS_ENABLED 1
-// Timestamp of the last PPS rising edge in microseconds (esp_timer_get_time()).
-// Written from the ISR (IRAM), read from gps_task for logging only.
+
 static volatile int64_t _pps_us = 0;
 #else
 #define GPS_PPS_ENABLED 0
 #endif
 
-// PPS ISR: called on each rising edge of the PPS signal.
-// Snaps tv_usec to 0 to align the system wall clock to the exact second
-// boundary. The GPS NMEA sentence (parsed by gps_task) has already set the
-// correct second value; the PPS pulse corrects the sub-second offset.
-// Must be in IRAM because it is called from an ISR context.
 #if GPS_PPS_ENABLED
 static void IRAM_ATTR pps_isr(void *arg) {
-    // Record ISR arrival time for optional diagnostic logging.
     _pps_us = esp_timer_get_time();
-    // Snap the sub-second component of the wall clock to zero.
-    // settimeofday() is documented as ISR-safe on ESP-IDF (it calls
-    // adjtime / clock_settime which use a spinlock internally).
+
     struct timeval tv;
     gettimeofday(&tv, NULL);
     tv.tv_usec = 0;
@@ -133,7 +115,7 @@ static bool validate_nmea_checksum(const char *sentence) {
     if (*p != '*')
         return false;
     p++;
-    // Accept upper and lower case hex digits for robustness
+
     if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1]))
         return false;
     uint8_t hi = (uint8_t)(isdigit((unsigned char)p[0]) ? p[0] - '0' : toupper((unsigned char)p[0]) - 'A' + 10);
@@ -143,7 +125,6 @@ static bool validate_nmea_checksum(const char *sentence) {
 }
 
 static bool parse_rmc(const char *sentence, struct timeval *tv) {
-    // Reject sentences with a bad or missing checksum before parsing any field
     if (!validate_nmea_checksum(sentence))
         return false;
 
@@ -186,6 +167,9 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     int mo = (tok[2] - '0') * 10 + (tok[3] - '0');
     int yy = (tok[4] - '0') * 10 + (tok[5] - '0') + 2000;
 
+    if (yy < 2020 || yy > 2035)
+        return false;
+
     struct tm t = { 0 };
     t.tm_hour = hh;
     t.tm_min = mm;
@@ -195,8 +179,7 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     t.tm_year = yy - 1900;
 
     time_t ts = mktime(&t);
-    // mktime() returns (time_t)-1 for invalid or out-of-range dates; reject them
-    // to avoid setting the system clock to a garbage epoch value.
+
     if (ts == (time_t)-1)
         return false;
 
@@ -205,13 +188,7 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     return true;
 }
 
-// parse_zda: parse a $GPZDA or $GNZDA sentence.
-// Format: $GPZDA,HHMMSS.ss,DD,MM,YYYY,ZH,ZM*CS
-// Fields: 1=time, 2=day, 3=month, 4=year, 5=local zone hours (ignored), 6=zone minutes (ignored).
-// GPZDA always carries UTC time regardless of local zone fields.
-// Returns true and fills *tv on success; returns false on any parse or checksum error.
 static bool parse_zda(const char *sentence, struct timeval *tv) {
-    // Validate checksum before touching any field.
     if (!validate_nmea_checksum(sentence))
         return false;
 
@@ -275,19 +252,12 @@ static bool parse_zda(const char *sentence, struct timeval *tv) {
     return true;
 }
 
-// parse_rmc_or_zda: dispatcher that tries the correct parser
-// based on the sentence talker+sentence-id prefix. This is more efficient than
-// calling both parsers sequentially and avoids re-copying the buffer.
-// Accepts $GPRMC, $GNRMC (RMC path) and $GPZDA, $GNZDA (ZDA path).
-// All other sentence types return false immediately without checksum check.
 static bool parse_rmc_or_zda(const char *sentence, struct timeval *tv) {
-    // Determine sentence type from first 6 characters to dispatch without copying.
-    // strncmp is safe even for short strings because the buffer is NUL-terminated.
     if (strncmp(sentence, "$GPZDA", 6) == 0 || strncmp(sentence, "$GNZDA", 6) == 0)
         return parse_zda(sentence, tv);
     if (strncmp(sentence, "$GPRMC", 6) == 0 || strncmp(sentence, "$GNRMC", 6) == 0)
         return parse_rmc(sentence, tv);
-    // All other sentence types (GGA, GLL, GSA, etc.) are silently ignored.
+
     return false;
 }
 
@@ -304,10 +274,7 @@ static void gps_task(void *arg) {
             if (c == '\n') {
                 line[line_pos] = '\0';
                 struct timeval tv;
-                // Use parse_rmc_or_zda() dispatcher instead of
-                // parse_rmc() alone so that $GPZDA/$GNZDA sentences are also used
-                // for time synchronisation. This improves compatibility with
-                // dual-constellation GPS modules that may emit GNZDA but not GNRMC.
+
                 if (parse_rmc_or_zda(line, &tv)) {
                     settimeofday(&tv, NULL);
                     _synced = true;
@@ -318,11 +285,7 @@ static void gps_task(void *arg) {
                 line[line_pos++] = c;
             }
         }
-        // Explicit short yield after every buffer processing
-        // (even when len==0) to guarantee idle task runs and prevent
-        // any edge-case watchdog triggers on long GPS-silent periods.
-        // uart_read_bytes timeout already yields, but this makes
-        // behaviour deterministic and fully explicit.
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -330,10 +293,6 @@ static void gps_task(void *arg) {
 esp_err_t time_sync_init(const char *ntp_server) {
     (void)ntp_server;
 
-    // Force UTC timezone before any mktime() call so that NMEA sentences,
-    // which always carry UTC time, are interpreted correctly.
-    // Without this, mktime() applies the local timezone offset and produces
-    // a timestamp that is wrong by the local UTC offset.
     setenv("TZ", "UTC0", 1);
     tzset();
 
@@ -351,11 +310,6 @@ esp_err_t time_sync_init(const char *ntp_server) {
     xTaskCreate(gps_task, "gps", 6144, NULL, 5, &_gps_task);
     ESP_LOGI(TAG, "GPS UART started on UART%d RX=%d (TZ forced to UTC)", CONFIG_GPS_UART_PORT, CONFIG_GPS_RX_GPIO);
 
-    // Optionally install PPS GPIO ISR for sub-millisecond
-    // time accuracy. The ISR snaps tv_usec to 0 on every rising edge,
-    // aligning the system wall clock to the exact GPS second boundary.
-    // This requires CONFIG_GPS_PPS_GPIO to be set to a valid GPIO number
-    // in menuconfig (range 0-39). Set to -1 (default) to disable PPS.
 #if GPS_PPS_ENABLED
     gpio_config_t pps_cfg = {
         .pin_bit_mask = BIT64(CONFIG_GPS_PPS_GPIO),
@@ -366,8 +320,6 @@ esp_err_t time_sync_init(const char *ntp_server) {
     };
     esp_err_t pps_err = gpio_config(&pps_cfg);
     if (pps_err == ESP_OK) {
-        // gpio_install_isr_service returns ESP_ERR_INVALID_STATE if already
-        // installed (e.g. by the GPIO filter driver); treat that as success.
         esp_err_t svc_err = gpio_install_isr_service(0);
         if (svc_err != ESP_OK && svc_err != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "GPS PPS: gpio_install_isr_service failed (%s) -- PPS disabled", esp_err_to_name(svc_err));
@@ -424,14 +376,10 @@ int32_t time_sync_secs_to_next_tx(void) {
     gettimeofday(&tv, NULL);
     time_t now = tv.tv_sec;
 
-    // Returning 0 only in [1,3] ensures the scheduler never starts a TX later
-    // than phase=3, giving a 6.4 s margin before the 120 s slot boundary.
-    uint32_t p = (uint32_t)(now % 120);
-    if (p < 1) {
-        return 1;
-    } else if (p <= 3) {
+    uint32_t p = (uint32_t)(now % 120u);
+    if (p <= 3u) {
         return 0;
     } else {
-        return (int32_t)(121 - p);
+        return (int32_t)(120u - p);
     }
 }

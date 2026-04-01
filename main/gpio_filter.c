@@ -26,8 +26,6 @@
 
 #include "gpio_filter.h"
 
-// Guard the three filter pins against each other: wiring two address
-// lines to the same GPIO turns the BCD decoder into a short circuit.
 static_assert(CONFIG_FILTER_GPIO_A != CONFIG_FILTER_GPIO_B, "FILTER_GPIO_A and FILTER_GPIO_B are the same pin — fix in menuconfig");
 static_assert(CONFIG_FILTER_GPIO_A != CONFIG_FILTER_GPIO_C, "FILTER_GPIO_A and FILTER_GPIO_C are the same pin — fix in menuconfig");
 static_assert(CONFIG_FILTER_GPIO_B != CONFIG_FILTER_GPIO_C, "FILTER_GPIO_B and FILTER_GPIO_C are the same pin — fix in menuconfig");

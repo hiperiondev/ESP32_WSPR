@@ -196,6 +196,24 @@ esp_err_t oscillator_enable(bool en);
  */
 esp_err_t oscillator_set_cal(int32_t ppb);
 
+// MODIFIED (Bug 1): oscillator_tx_begin() and oscillator_tx_end() bracket the
+// WSPR TX window so oscillator_set_cal() can detect an in-progress transmission
+// and defer cache invalidation rather than corrupting the symbol loop.
+
+// Call immediately before oscillator_enable(true) at TX start.
+// Sets the internal TX-active flag; oscillator_set_cal() queues any
+// calibration update rather than applying it immediately.
+void oscillator_tx_begin(void);
+
+// Call immediately after oscillator_enable(false) at TX end.
+// Clears the TX-active flag and applies any calibration update that was
+// deferred during the symbol loop.
+// NOTE: for AD9850, calling oscillator_enable(false) powers down the DAC
+// output but does NOT reset the phase accumulator. Phase continuity within
+// a single TX window is maintained by not calling oscillator_enable()
+// between symbols.
+void oscillator_tx_end(void);
+
 /**
  * @defgroup oscillator_detection Hardware detection API
  * @{

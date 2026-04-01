@@ -30,17 +30,8 @@
 static const char *TAG = "config";
 #define NVS_NS "wspr"
 
-// set to true in config_load() when stored config is discarded
-// due to blob size mismatch or schema version mismatch; queried by web_server
-// to display a one-time "settings reset to defaults" warning in the UI.
 static bool _was_reset = false;
 
-// 60 m dial frequencies by region (source: IARU band plans + WSPRnet):
-//   Region 1 (EU/Africa)  : 5 288 600 Hz  (IARU R1 60 m WSPR allocation)
-//   Region 2 (Americas)   : 5 346 500 Hz  (FCC channels centre, ARRL coord.)
-//   Region 3 (Asia/Pacific): 5 367 000 Hz  (WIA/JARL coordination)
-//
-// Row 0 = IARU Region 1, Row 1 = Region 2, Row 2 = Region 3.
 const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     // -- Region 1: Europe, Africa, Middle East --
     {
@@ -109,7 +100,6 @@ const uint8_t BAND_FILTER[BAND_COUNT] = {
 };
 
 static_assert(sizeof(CONFIG_WSPR_DEFAULT_CALLSIGN) <= CALLSIGN_LEN, "Default callsign too long for CALLSIGN_LEN");
-// Accept 4-char (DDLL) or 6-char (DDLLSS) default locator.
 static_assert(sizeof(CONFIG_WSPR_DEFAULT_LOCATOR) == 5 || sizeof(CONFIG_WSPR_DEFAULT_LOCATOR) == 7,
               "Default locator must be 4 characters (DDLL) or 6 characters (DDLLSS)");
 
@@ -129,7 +119,6 @@ void config_defaults(wspr_config_t *cfg) {
     cfg->xtal_cal_ppb = 0;
     cfg->iaru_region = (uint8_t)IARU_REGION_1;
     cfg->bands_changed = false;
-    // Always start from even slot (primary message) after defaults.
     cfg->tx_slot_parity = 0;
 }
 
@@ -172,14 +161,14 @@ esp_err_t config_load(wspr_config_t *cfg) {
     if (sz != sizeof(*cfg)) {
         ESP_LOGW(TAG, "Config blob size mismatch (stored=%u expected=%u), using defaults", (unsigned)sz, (unsigned)sizeof(*cfg));
         config_defaults(cfg);
-        _was_reset = true; // flag reset so UI can warn user
+        _was_reset = true;
         return ESP_OK;
     }
 
     if (cfg->version != CONFIG_SCHEMA_VERSION) {
         ESP_LOGW(TAG, "Config schema mismatch (stored=%u expected=%u), using defaults", cfg->version, (unsigned)CONFIG_SCHEMA_VERSION);
         config_defaults(cfg);
-        _was_reset = true; // flag reset so UI can warn user
+        _was_reset = true;
         return ESP_OK;
     }
 
@@ -189,23 +178,13 @@ esp_err_t config_load(wspr_config_t *cfg) {
     cfg->wifi_pass[sizeof(cfg->wifi_pass) - 1] = '\0';
     cfg->ntp_server[sizeof(cfg->ntp_server) - 1] = '\0';
 
-    // clamp iaru_region to valid range 1-3; fix any corrupt NVS value.
     if (cfg->iaru_region < 1 || cfg->iaru_region > 3)
         cfg->iaru_region = (uint8_t)IARU_REGION_1;
 
-    // clamp hop_interval_sec to the minimum of one WSPR TX slot.
-    // A corrupt or legacy NVS value below 120 s would rotate bands on every
-    // scheduler iteration instead of once per slot, breaking normal operation.
     if (cfg->hop_interval_sec < 120u)
         cfg->hop_interval_sec = 120u;
 
-    // bands_changed is a runtime coordination flag between the
-    // HTTP handler and the scheduler task. It has no meaningful state across
-    // power cycles. Clearing it here prevents an unnecessary band-list rebuild
-    // on the first scheduler iteration after every cold boot following a
-    // config save (h_post_config always sets it true before config_save()).
     cfg->bands_changed = false;
-    // tx_slot_parity is runtime-only; always clear after cold boot.
     cfg->tx_slot_parity = 0;
 
     ESP_LOGI(TAG, "Config loaded: cs=%s loc=%s pwr=%d dBm cal=%ld ppb region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb,

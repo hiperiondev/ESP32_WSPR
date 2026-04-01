@@ -32,8 +32,6 @@
 
 #include "config.h"
 #include "oscillator.h"
-// MODIFIED (Bug 7): included time_sync.h to call time_sync_restart_ntp() when
-// the NTP server hostname changes via POST /api/config.
 #include "time_sync.h"
 #include "version.h"
 #include "web_server.h"
@@ -45,17 +43,14 @@
 
 #define HTTP_AUTH_WARNING ""
 
-// check_auth: validate Authorization: Basic <b64> header against Kconfig credentials.
-// Returns true when credentials match, false when header is absent or wrong.
 static bool check_auth(httpd_req_t *req) {
     char auth_hdr[160] = { 0 };
-    // ESP-IDF httpd: returns ESP_OK only when the header value fits in the buffer.
     if (httpd_req_get_hdr_value_str(req, "Authorization", auth_hdr, sizeof(auth_hdr)) != ESP_OK)
         return false;
-    // Basic auth header must start with "Basic " (6 chars).
+
     if (strncmp(auth_hdr, "Basic ", 6) != 0)
         return false;
-    // Decode the base64 credential string that follows "Basic ".
+
     unsigned char decoded[128] = { 0 };
     size_t decoded_len = 0;
     const unsigned char *b64 = (const unsigned char *)(auth_hdr + 6);
@@ -63,14 +58,11 @@ static bool check_auth(httpd_req_t *req) {
     if (rc != 0)
         return false;
     decoded[decoded_len] = '\0';
-    // Decoded string must be exactly "user:password".
     char expected[160];
     snprintf(expected, sizeof(expected), "%s:%s", CONFIG_WSPR_HTTP_AUTH_USER, CONFIG_WSPR_HTTP_AUTH_PASS);
     return strcmp((char *)decoded, expected) == 0;
 }
 
-// send_auth_challenge: emit HTTP 401 with WWW-Authenticate header so the browser
-// shows its native credential prompt.
 static esp_err_t send_auth_challenge(httpd_req_t *req) {
     httpd_resp_set_status(req, "401 Unauthorized");
     httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"WSPR\"");
@@ -514,14 +506,7 @@ void web_server_update_status(bool time_ok, const char *time_str, const char *ba
     }
 }
 
-// web_server_set_hw_status: removed unsafe lockless fallback write.
-// If mutex is NULL (called before web_server_start), write directly because
-// we are still single-threaded at that point.
-// If mutex acquisition times out, log a warning and skip the update entirely
-// instead of writing to _status from two tasks simultaneously.
 void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
-    // Called before web_server_start: mutex does not exist yet.
-    // At this point only app_main runs so a direct write is safe.
     if (_status_mutex == NULL) {
         _status.hw_ok = hw_ok;
         if (hw_name) {
@@ -530,10 +515,8 @@ void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
         }
         return;
     }
-    // Mutex exists: take it with a generous timeout so transient contention
-    // from status_task does not cause a missed update.
+
     if (xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-        // Abort rather than writing without the mutex (was the old else-branch).
         ESP_LOGW(TAG, "hw_status: mutex timeout, skipping update");
         return;
     }
@@ -562,7 +545,10 @@ void web_server_set_reboot_info(const char *boot_time_str, const char *reason_st
 
 void web_server_cfg_lock(void) {
     if (_cfg_mutex) {
-        xSemaphoreTake(_cfg_mutex, portMAX_DELAY);
+        if (xSemaphoreTake(_cfg_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+            ESP_LOGW(TAG, "cfg_mutex timeout -- possible deadlock, retrying with infinite wait");
+            xSemaphoreTake(_cfg_mutex, portMAX_DELAY);
+        }
     }
 }
 
@@ -572,49 +558,48 @@ void web_server_cfg_unlock(void) {
     }
 }
 
-// validate_callsign: now allows '/' for compound callsigns (Type-2).
-// Compound form: PREFIX/CALL (e.g. PJ4/K1ABC) or CALL/SUFFIX (e.g. K1ABC/P).
-// At most one slash is permitted; wspr_encode() routes compound callsigns to
-// Type-2 encoding which handles the slash correctly.
 static bool validate_callsign(const char *s) {
     int len = (int)strlen(s);
-    // Minimum length is 3 (e.g. "N0X"), maximum is CALLSIGN_LEN-1.
+
     if (len < 3 || len > CALLSIGN_LEN - 1)
         return false;
     int slash_count = 0;
     for (int i = 0; i < len; i++) {
         char c = (char)toupper((unsigned char)s[i]);
-        // Allow '/' in addition to alphanumeric and space.
+
         if (!isalnum((unsigned char)c) && c != ' ' && c != '/')
             return false;
+
         if (c == '/')
             slash_count++;
     }
-    // At most one slash allowed (PREFIX/CALL/SUFFIX form is not valid WSPR).
+
     if (slash_count > 1)
         return false;
+
     return true;
 }
 
-// validate_locator: accepts 4-char (DDLL) or 6-char (DDLLSS) Maidenhead locators.
-// 4-char locators produce standard Type-1 transmissions.
-// 6-char locators enable Type-3 companion transmissions for sub-square precision.
 static bool validate_locator(const char *s) {
     size_t len = strlen(s);
-    // Accept exactly 4 or exactly 6 characters.
+
     if (len != 4 && len != 6)
         return false;
+
     char c0 = (char)toupper((unsigned char)s[0]);
     char c1 = (char)toupper((unsigned char)s[1]);
     if (c0 < 'A' || c0 > 'R')
         return false;
+
     if (c1 < 'A' || c1 > 'R')
         return false;
+
     if (!isdigit((unsigned char)s[2]))
         return false;
+
     if (!isdigit((unsigned char)s[3]))
         return false;
-    // Validate subsquare letters for 6-char locator (A..X each).
+
     if (len == 6) {
         char c4 = (char)toupper((unsigned char)s[4]);
         char c5 = (char)toupper((unsigned char)s[5]);
@@ -645,29 +630,20 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     cJSON *j = cJSON_CreateObject();
     cJSON_AddStringToObject(j, "callsign", _cfg->callsign);
     cJSON_AddStringToObject(j, "locator", _cfg->locator);
-    // All integer fields use cJSON_AddRawToObject instead of
-    // cJSON_AddNumberToObject to avoid software double-precision FP emulation.
-    // The Xtensa LX6 core has a hardware single-precision FPU only; every
-    // cJSON_AddNumberToObject call internally stores the value as double and
-    // triggers libgcc software FP routines, wasting hundreds of cycles and stack.
-    // cJSON_AddRawToObject with an snprintf-formatted string is exact and FP-free.
 
-    // power_dbm: was cJSON_AddNumberToObject (software double FP)
     char _pwr_str[8];
     snprintf(_pwr_str, sizeof(_pwr_str), "%u", (unsigned)_cfg->power_dbm);
     cJSON_AddRawToObject(j, "power_dbm", _pwr_str);
-
     cJSON_AddStringToObject(j, "wifi_ssid", _cfg->wifi_ssid);
     cJSON_AddBoolToObject(j, "has_pass", _cfg->wifi_pass[0] != '\0');
     cJSON_AddStringToObject(j, "ntp_server", _cfg->ntp_server);
-    // The JS loadCfg() reads cfg.hop_enabled to restore the toggle on page load.
-    // Without this field the toggle always appeared unchecked after reboot/restart
-    // even though the value was correctly persisted in NVS and loaded into g_cfg.
     cJSON_AddBoolToObject(j, "hop_enabled", _cfg->hop_enabled);
+
     char _hop_str[16];
     snprintf(_hop_str, sizeof(_hop_str), "%lu", (unsigned long)_cfg->hop_interval_sec);
     cJSON_AddRawToObject(j, "hop_interval_sec", _hop_str);
     cJSON_AddBoolToObject(j, "tx_enabled", _cfg->tx_enabled);
+
     char _duty_str[8];
     snprintf(_duty_str, sizeof(_duty_str), "%u", (unsigned)_cfg->tx_duty_pct);
     cJSON_AddRawToObject(j, "tx_duty_pct", _duty_str);
@@ -691,12 +667,10 @@ static esp_err_t h_get_config(httpd_req_t *req) {
     httpd_resp_send(req, s, strlen(s));
     free(s);
     cJSON_Delete(j);
+
     return ESP_OK;
 }
 
-// MODIFIED (Bug 7): h_post_config now detects an NTP server hostname change and
-// calls time_sync_restart_ntp() after saving so the new server takes effect
-// immediately without requiring a reboot.
 static esp_err_t h_post_config(httpd_req_t *req) {
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
     if (!check_auth(req))
@@ -704,27 +678,22 @@ static esp_err_t h_post_config(httpd_req_t *req) {
 #endif
     char buf[1024] = { 0 };
     int total = req->content_len;
-    // Reject bodies that would not fit in buf instead of silently
-    // truncating them. A truncated body produces incomplete JSON that cJSON
-    // either rejects outright (JSON parse error) or partially parses, both
-    // of which can cause subtle config corruption when new schema fields are
-    // added in a future CONFIG_SCHEMA_VERSION bump.
+
     if (total >= (int)sizeof(buf)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "request body too large");
         return ESP_OK;
     }
-    {
-        int received = 0;
-        while (received < total) {
-            int r = httpd_req_recv(req, buf + received, total - received);
-            if (r <= 0) {
-                if (r == HTTPD_SOCK_ERR_TIMEOUT)
-                    continue;
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv error");
-                return ESP_FAIL;
-            }
-            received += r;
+
+    int received = 0;
+    while (received < total) {
+        int r = httpd_req_recv(req, buf + received, total - received);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT)
+                continue;
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "recv error");
+            return ESP_FAIL;
         }
+        received += r;
     }
 
     cJSON *j = cJSON_Parse(buf);
@@ -751,10 +720,6 @@ static esp_err_t h_post_config(httpd_req_t *req) {
 
     web_server_cfg_lock();
 
-    // MODIFIED (Bug 7): snapshot the current NTP server before overwriting it so
-    // we can detect a change after releasing the lock and restart the SNTP client.
-    // The snapshot must be taken inside the lock to avoid a race with another
-    // concurrent POST /api/config call (unlikely but possible in theory).
     char old_ntp_snap[sizeof(_cfg->ntp_server)];
     strncpy(old_ntp_snap, _cfg->ntp_server, sizeof(old_ntp_snap) - 1);
     old_ntp_snap[sizeof(old_ntp_snap) - 1] = '\0';
@@ -769,12 +734,7 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     if (v_loc && cJSON_IsString(v_loc)) {
         strncpy(_cfg->locator, v_loc->valuestring, LOCATOR_LEN - 1);
         _cfg->locator[LOCATOR_LEN - 1] = '\0';
-        // Normalize locator to uppercase on the server side.
-        // The JS save() calls .toUpperCase() but a direct API POST (e.g. from
-        // a script or curl) may send lowercase subsquare letters (e.g. "GF05ab").
-        // wspr_encode* internally calls toupper() so encoding is always correct,
-        // but the value stored in NVS and returned by GET /api/config would be
-        // mixed-case without this normalisation, causing cosmetic inconsistency.
+
         for (int _i = 0; _cfg->locator[_i] != '\0'; _i++)
             _cfg->locator[_i] = (char)toupper((unsigned char)_cfg->locator[_i]);
     }
@@ -787,20 +747,25 @@ static esp_err_t h_post_config(httpd_req_t *req) {
             pwr = 60;
         _cfg->power_dbm = (uint8_t)pwr;
     }
+
     if ((v = cJSON_GetObjectItem(j, "wifi_ssid")) && cJSON_IsString(v)) {
         strncpy(_cfg->wifi_ssid, v->valuestring, sizeof(_cfg->wifi_ssid) - 1);
         _cfg->wifi_ssid[sizeof(_cfg->wifi_ssid) - 1] = '\0';
     }
+
     if ((v = cJSON_GetObjectItem(j, "wifi_pass")) && cJSON_IsString(v)) {
         strncpy(_cfg->wifi_pass, v->valuestring, sizeof(_cfg->wifi_pass) - 1);
         _cfg->wifi_pass[sizeof(_cfg->wifi_pass) - 1] = '\0';
     }
+
     if ((v = cJSON_GetObjectItem(j, "ntp_server")) && cJSON_IsString(v)) {
         strncpy(_cfg->ntp_server, v->valuestring, sizeof(_cfg->ntp_server) - 1);
         _cfg->ntp_server[sizeof(_cfg->ntp_server) - 1] = '\0';
     }
+
     if ((v = cJSON_GetObjectItem(j, "hop_enabled")) && cJSON_IsBool(v))
         _cfg->hop_enabled = cJSON_IsTrue(v);
+
     if ((v = cJSON_GetObjectItem(j, "hop_interval_sec")) && cJSON_IsNumber(v)) {
         uint32_t interval = (uint32_t)v->valueint;
         if (interval < 120u)
@@ -809,6 +774,7 @@ static esp_err_t h_post_config(httpd_req_t *req) {
             interval = 86400u;
         _cfg->hop_interval_sec = interval;
     }
+
     if ((v = cJSON_GetObjectItem(j, "tx_duty_pct")) && cJSON_IsNumber(v)) {
         int pct = v->valueint;
         if (pct < 0)
@@ -817,6 +783,7 @@ static esp_err_t h_post_config(httpd_req_t *req) {
             pct = 100;
         _cfg->tx_duty_pct = (uint8_t)pct;
     }
+
     if ((v = cJSON_GetObjectItem(j, "xtal_cal_ppb")) && cJSON_IsNumber(v)) {
         int32_t ppb = (int32_t)v->valueint;
         if (ppb < -100000)
@@ -825,6 +792,7 @@ static esp_err_t h_post_config(httpd_req_t *req) {
             ppb = 100000;
         _cfg->xtal_cal_ppb = ppb;
     }
+
     if ((v = cJSON_GetObjectItem(j, "iaru_region")) && cJSON_IsNumber(v)) {
         int region = v->valueint;
         if (region < 1 || region > 3)
@@ -832,42 +800,26 @@ static esp_err_t h_post_config(httpd_req_t *req) {
         _cfg->iaru_region = (uint8_t)region;
     }
 
-    // h_post_config band_enabled partial update.
-    // The original code only wrote entries [0..n-1] from the JSON array,
-    // leaving band_enabled[n..BAND_COUNT-1] at their stale NVS values when
-    // the client sent fewer than BAND_COUNT items.
-    // zero all entries first, then apply only what the client sent.
     cJSON *bands = cJSON_GetObjectItem(j, "band_enabled");
     if (cJSON_IsArray(bands)) {
-        // Reset all entries to false before applying the update so that
-        // a short array from the client cannot leave stale entries enabled.
         memset(_cfg->band_enabled, 0, sizeof(_cfg->band_enabled));
         int n = cJSON_GetArraySize(bands);
+
         if (n > BAND_COUNT)
             n = BAND_COUNT;
+
         for (int i = 0; i < n; i++)
             _cfg->band_enabled[i] = cJSON_IsTrue(cJSON_GetArrayItem(bands, i));
     }
 
-    _cfg->bands_changed = true; // mark for rebuild when band_enabled or hop_enabled changed via web UI
+    _cfg->bands_changed = true;
 
     wspr_config_t cfg_snap = *_cfg;
-    // snapshot the new calibration value before releasing the
-    // lock so we can apply it to the oscillator driver without holding the mutex.
     int32_t new_cal_ppb = cfg_snap.xtal_cal_ppb;
     web_server_cfg_unlock();
 
-    // apply the new crystal calibration immediately so it takes
-    // effect on the next oscillator_set_freq() call without requiring a reboot.
-    // oscillator_set_cal() only stores the ppb value internally; it does not
-    // reprogram hardware until the next frequency-set call, making this safe
-    // to call from the HTTP task at any time, even during an active TX.
     oscillator_set_cal(new_cal_ppb);
 
-    // MODIFIED (Bug 7): if the NTP server hostname changed, restart the SNTP
-    // client immediately so the new server is used without requiring a reboot.
-    // cfg_snap.ntp_server holds the newly applied value captured inside the lock.
-    // Compiled only in NTP mode; GPS mode has no configurable server hostname.
 #ifdef CONFIG_WSPR_TIME_NTP
     if (strncmp(old_ntp_snap, cfg_snap.ntp_server, sizeof(cfg_snap.ntp_server)) != 0) {
         time_sync_restart_ntp(cfg_snap.ntp_server);
@@ -907,12 +859,11 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
     snprintf(resp, sizeof(resp), "{\"tx_enabled\":%s}", enabled ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, resp, strlen(resp));
+
     return ESP_OK;
 }
 
 static esp_err_t h_status(httpd_req_t *req) {
-    // Auth guard: status endpoint is polled by the UI every 2 s.
-    // Protect it so that unauthenticated clients receive 401, not live data.
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
     if (!check_auth(req))
         return send_auth_challenge(req);
@@ -930,25 +881,20 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON_AddStringToObject(j, "time_str", snap.time_str);
     cJSON_AddStringToObject(j, "band", snap.band);
     cJSON_AddStringToObject(j, "freq_str", snap.freq_str);
-    // avoid double FP for integer status fields.
-    {
-        char _ntx_str[16];
-        snprintf(_ntx_str, sizeof(_ntx_str), "%ld", (long)snap.next_tx_sec);
-        cJSON_AddRawToObject(j, "next_tx_sec", _ntx_str);
-    }
+
+    char _ntx_str[16];
+    snprintf(_ntx_str, sizeof(_ntx_str), "%ld", (long)snap.next_tx_sec);
+    cJSON_AddRawToObject(j, "next_tx_sec", _ntx_str);
     cJSON_AddBoolToObject(j, "tx_active", snap.tx_active);
     cJSON_AddBoolToObject(j, "tx_enabled", snap.tx_enabled);
-    {
-        char _sym_str[8];
-        snprintf(_sym_str, sizeof(_sym_str), "%d", snap.symbol_idx);
-        cJSON_AddRawToObject(j, "symbol_idx", _sym_str);
-    }
-    // expose reboot info so the UI subtitle is populated from the API
+
+    char _sym_str[8];
+    snprintf(_sym_str, sizeof(_sym_str), "%d", snap.symbol_idx);
+    cJSON_AddRawToObject(j, "symbol_idx", _sym_str);
     cJSON_AddStringToObject(j, "boot_time_str", snap.reboot_time_str);
     cJSON_AddStringToObject(j, "reboot_reason", snap.reboot_reason);
-    // expose settings_reset flag so the JS shows a one-time
-    // toast when NVS config was discarded and defaults were applied this boot.
     cJSON_AddBoolToObject(j, "settings_reset", config_was_reset());
+
     char *s = cJSON_PrintUnformatted(j);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, s, strlen(s));
@@ -958,7 +904,6 @@ static esp_err_t h_status(httpd_req_t *req) {
 }
 
 static esp_err_t h_wifi_scan(httpd_req_t *req) {
-    // Auth guard: Wi-Fi scan reveals nearby SSIDs; require auth.
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
     if (!check_auth(req))
         return send_auth_challenge(req);
@@ -968,14 +913,15 @@ static esp_err_t h_wifi_scan(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan alloc failed");
         return ESP_OK;
     }
+
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, (ssize_t)strlen(json));
     free(json);
+
     return ESP_OK;
 }
 
 static esp_err_t h_reset(httpd_req_t *req) {
-    // Auth guard: /api/reset causes esp_restart(); must be protected.
 #if CONFIG_WSPR_HTTP_AUTH_ENABLE
     if (!check_auth(req))
         return send_auth_challenge(req);
@@ -984,6 +930,7 @@ static esp_err_t h_reset(httpd_req_t *req) {
     httpd_resp_send(req, "{\"ok\":true}", -1);
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
+
     return ESP_OK;
 }
 
@@ -997,6 +944,7 @@ esp_err_t web_server_start(wspr_config_t *cfg) {
             return ESP_ERR_NO_MEM;
         }
     }
+
     if (_status_mutex == NULL) {
         _status_mutex = xSemaphoreCreateMutex();
         if (_status_mutex == NULL) {
@@ -1023,10 +971,12 @@ esp_err_t web_server_start(wspr_config_t *cfg) {
         { .uri = "/api/wifi_scan", .method = HTTP_GET, .handler = h_wifi_scan },
         { .uri = "/api/reset", .method = HTTP_POST, .handler = h_reset },
     };
+
     for (int i = 0; i < 7; i++)
         httpd_register_uri_handler(_srv, &routes[i]);
 
     ESP_LOGI(TAG, "HTTP server started");
+
     return ESP_OK;
 }
 
@@ -1035,5 +985,6 @@ esp_err_t web_server_stop(void) {
         httpd_stop(_srv);
         _srv = NULL;
     }
+
     return ESP_OK;
 }

@@ -46,6 +46,7 @@ static int _retry = 0;
 static char _sta_ssid_saved[33] = { 0 };
 static char _sta_pass_saved[65] = { 0 };
 static esp_timer_handle_t _sta_retry_timer = NULL;
+static SemaphoreHandle_t _scan_mutex = NULL;
 
 static void try_sta_reconnect(void *arg) {
     if (_sta_ok)
@@ -152,6 +153,10 @@ static void start_ap(void) {
 esp_err_t wifi_manager_start(const char *sta_ssid, const char *sta_pass) {
     _eg = xEventGroupCreate();
 
+    if (_scan_mutex == NULL) {
+        _scan_mutex = xSemaphoreCreateMutex();
+    }
+
     ESP_ERROR_CHECK(esp_netif_init());
 
     esp_err_t loop_err = esp_event_loop_create_default();
@@ -216,72 +221,82 @@ const char *wifi_manager_ip(void) {
 }
 
 char *wifi_manager_scan(void) {
-    // Determine current mode so we can restore it after the scan.
+    if (_scan_mutex && xSemaphoreTake(_scan_mutex, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        ESP_LOGW(TAG, "scan: concurrent call rejected (mutex timeout)");
+        char *empty = malloc(3);
+        if (empty) {
+            empty[0] = '[';
+            empty[1] = ']';
+            empty[2] = '\0';
+        }
+        return empty;
+    }
+
     wifi_mode_t mode_before = WIFI_MODE_NULL;
     esp_wifi_get_mode(&mode_before);
 
-    // The scan STA interface needs to be up.  In AP-only mode, elevate to APSTA.
     bool elevated = false;
     if (mode_before == WIFI_MODE_AP) {
         if (esp_wifi_set_mode(WIFI_MODE_APSTA) != ESP_OK) {
             ESP_LOGW(TAG, "scan: could not switch to APSTA — returning empty list");
-            // Return an empty JSON array so the UI does not break.
             char *empty = malloc(3);
             if (empty) {
                 empty[0] = '[';
                 empty[1] = ']';
                 empty[2] = '\0';
             }
+
+            if (_scan_mutex)
+                xSemaphoreGive(_scan_mutex);
             return empty;
         }
-        // delay after mode switch to APSTA so the STA
-        // interface PHY has time to initialise before the scan starts.
-        // Without this delay, esp_wifi_scan_start() runs before the STA
-        // radio is ready and consistently returns 0 results.
+
         vTaskDelay(pdMS_TO_TICKS(300));
         elevated = true;
     }
 
-    // Blocking scan: scan_config all-zero uses defaults (all channels, active).
     wifi_scan_config_t scan_cfg = { 0 };
     esp_err_t err = esp_wifi_scan_start(&scan_cfg, true); // true = blocking
     if (err != ESP_OK) {
-        // distinct log message for scan-start failure so the
-        // user can tell "interface not ready" from other failure causes.
+
         ESP_LOGW(TAG, "scan: start failed (%s) — likely STA interface not ready", esp_err_to_name(err));
         if (elevated) {
             esp_wifi_set_mode(WIFI_MODE_AP);
         }
+
         char *empty = malloc(3);
         if (empty) {
             empty[0] = '[';
             empty[1] = ']';
             empty[2] = '\0';
         }
+
+        if (_scan_mutex)
+            xSemaphoreGive(_scan_mutex);
         return empty;
     }
 
-    // Retrieve the number of discovered APs.
     uint16_t count = 0;
     esp_wifi_scan_get_ap_num(&count);
     if (count == 0) {
-        // log "no APs found" separately from scan-start failure
         ESP_LOGI(TAG, "scan: completed but no APs found");
         if (elevated) {
             esp_wifi_set_mode(WIFI_MODE_AP);
         }
+
         char *empty = malloc(3);
         if (empty) {
             empty[0] = '[';
             empty[1] = ']';
             empty[2] = '\0';
         }
+
+        if (_scan_mutex)
+            xSemaphoreGive(_scan_mutex);
+
         return empty;
     }
 
-    // Fetch up to 30 records so the hidden-SSID filter below has spare
-    // capacity to find 20 visible networks even when some returned records are hidden.
-    // The visible cap stays at 20 after filtering to keep the HTTP payload manageable.
     if (count > 30) {
         count = 30;
     }
@@ -291,40 +306,35 @@ char *wifi_manager_scan(void) {
         if (elevated) {
             esp_wifi_set_mode(WIFI_MODE_AP);
         }
+
+        if (_scan_mutex)
+            xSemaphoreGive(_scan_mutex);
         return NULL;
     }
 
     esp_wifi_scan_get_ap_records(&count, records);
 
-    // Filter out hidden networks (empty SSID) before applying the 20-AP cap.
-    // Hidden SSIDs cannot be selected from the web UI and waste slots in the visible list.
-    // In dense environments this ensures the user's target AP is not pushed out of the list.
-    // Records arrive sorted by RSSI (strongest first) from the driver, so filtering in-place
-    // compactly preserves that ordering without a separate sort step.
-    {
-        uint16_t visible = 0;
-        for (uint16_t fi = 0; fi < count; fi++) {
-            if (records[fi].ssid[0] != '\0') {
-                if (fi != visible)
-                    records[visible] = records[fi];
-                visible++;
-            }
+    uint16_t visible = 0;
+    for (uint16_t fi = 0; fi < count; fi++) {
+        if (records[fi].ssid[0] != '\0') {
+            if (fi != visible)
+                records[visible] = records[fi];
+            visible++;
         }
-        // Cap visible results at 20 for HTTP payload size.
-        count = (visible > 20u) ? 20u : visible;
     }
+    count = (visible > 20u) ? 20u : visible;
 
-    // Restore the original WiFi mode before building the response.
     if (elevated) {
         esp_wifi_set_mode(WIFI_MODE_AP);
     }
 
-    // Each entry worst case: {"ssid":"<32 chars>","rssi":-100,"auth":1}
-    // = ~60 bytes + 2 for brackets + count-1 commas + NUL.
     size_t buf_sz = 4 + (size_t)count * 80;
     char *buf = malloc(buf_sz);
     if (!buf) {
         free(records);
+        if (_scan_mutex)
+            xSemaphoreGive(_scan_mutex);
+
         return NULL;
     }
 
@@ -332,7 +342,6 @@ char *wifi_manager_scan(void) {
     buf[pos++] = '[';
 
     for (uint16_t i = 0; i < count; i++) {
-        // Escape any double-quote or backslash in the SSID to produce valid JSON.
         char ssid_safe[96] = { 0 };
         size_t sp = 0;
         for (int k = 0; k < 32 && records[i].ssid[k] != '\0' && sp < sizeof(ssid_safe) - 3; k++) {
@@ -344,13 +353,11 @@ char *wifi_manager_scan(void) {
         }
         ssid_safe[sp] = '\0';
 
-        // auth: 0 = open (WIFI_AUTH_OPEN), 1 = any form of security.
         int auth = (records[i].authmode == WIFI_AUTH_OPEN) ? 0 : 1;
 
         int written =
             snprintf(buf + pos, buf_sz - pos, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"auth\":%d}", (i > 0) ? "," : "", ssid_safe, (int)records[i].rssi, auth);
         if (written < 0 || (size_t)written >= buf_sz - pos) {
-            // Buffer too small: stop here; the array is still valid JSON.
             break;
         }
         pos += (size_t)written;
@@ -367,5 +374,9 @@ char *wifi_manager_scan(void) {
 
     free(records);
     ESP_LOGI(TAG, "WiFi scan complete: %u APs found", (unsigned)count);
+
+    if (_scan_mutex)
+        xSemaphoreGive(_scan_mutex);
+
     return buf;
 }
