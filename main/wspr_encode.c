@@ -716,7 +716,13 @@ static int pack_callsign_type2(const char *cs, int power_dbm, uint32_t *n_call_o
  * @return    15-bit hash value (0..32767).
  */
 static uint32_t callsign_hash15(const char *cs) {
-    uint32_t n = 0;
+    // Split the 30-bit accumulator into two 15-bit halves (n_hi, n_lo) so
+    // that each intermediate product stays well within uint32_t:
+    //   n_lo * 37 + v  <= 32767*37+36 = 1,212,415 < 2^21 (safe)
+    //   n_hi * 37 + carry <= 32767*37+37 = 1,212,416 < 2^21 (safe)
+    // The final XOR-fold (n_hi ^ n_lo) is identical to ((n>>15)^n)&0x7FFF of
+    // the K1JT 64-bit reference because n_hi == n>>15 and n_lo == n&0x7FFF.
+    uint32_t n_hi = 0, n_lo = 0;
     for (int i = 0; cs[i] != '\0'; i++) {
         char c = toupper((unsigned char)cs[i]);
         uint32_t v;
@@ -725,20 +731,16 @@ static uint32_t callsign_hash15(const char *cs) {
         else if (c >= 'A' && c <= 'Z')
             v = (uint32_t)(c - 'A') + 10u;
         else
-            v = 36; // space or any other character
-
-        // Mask to 30 bits after each multiply-accumulate step.
-        // The XOR fold below uses only bits [14:0] and [29:15] of n, so
-        // bits above bit 29 never affect the result. Reducing mod 2^30 here
-        // prevents the 32-bit overflow that corrupts hashes for callsigns
-        // longer than 6 characters (37^7 > UINT32_MAX).
-        n = (n * 37u + v) & 0x3FFFFFFFu;
+            v = 36u; // space or any other character
+        // Accumulate n = n*37 + v (mod 2^30) using two 15-bit halves.
+        uint32_t lo_new = n_lo * 37u + v;       // max 1,212,415 -- fits uint32_t
+        uint32_t carry  = lo_new >> 15;          // carry into the upper half
+        n_lo = lo_new & 0x7FFFu;                 // keep bits[14:0]
+        uint32_t hi_new = n_hi * 37u + carry;    // max 1,212,416 -- fits uint32_t
+        n_hi = hi_new & 0x7FFFu;                 // keep bits[29:15] of n
     }
-
-    // Fold upper 15 bits (bits [29:15]) XOR lower 15 bits (bits [14:0]),
-    // then mask to 15 bits. Identical to the K1JT 64-bit reference result
-    // because we preserved all 30 bits that this fold depends on.
-    return ((n >> 15) ^ n) & 0x7FFFu;
+    // XOR-fold: n_hi == n>>15, n_lo == n&0x7FFF, so result matches K1JT reference.
+    return (n_hi ^ n_lo) & 0x7FFFu;
 }
 
 /**

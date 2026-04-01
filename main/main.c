@@ -40,8 +40,20 @@ static const char *TAG = "wspr_main";
 // The oscillator driver receives offsets in milli-Hz, so:
 //   tone_offset_mHz = symbol_value * 375000 / 256
 // which equals symbol_value * 1464.844 mHz, matching the WSPR specification.
-#define WSPR_TONE_NUM     375000UL  // tone numerator: spacing_mHz * 256
-#define WSPR_TONE_DEN     256UL     // tone denominator
+#define WSPR_TONE_NUM 375000UL // tone numerator: spacing_mHz * 256
+#define WSPR_TONE_DEN 256UL    // tone denominator
+
+// Inline helper: read esp_timer and truncate to 32 bits.
+// Using a dedicated inline instead of repeating the cast expression guarantees
+// that every elapsed measurement in the symbol loop uses the same truncation
+// epoch.  Unsigned 32-bit subtraction wraps correctly when the 32-bit counter
+// rolls over (~71.6 min), so "timer_us32() - tx_start_us" is always valid as
+// long as at most 4294 seconds have elapsed since tx_start_us was captured
+// (a 110-second WSPR frame fits comfortably within that window).
+static inline uint32_t timer_us32(void) {
+    // Intentional truncation: cast discards upper 32 bits of the 64-bit timer.
+    return (uint32_t)esp_timer_get_time();
+}
 
 // Symbol period: 8192/12000 s = 682666.67 µs per symbol.
 // Stored as 3x the period (2 048 000 µs) to allow comparison using integer
@@ -179,7 +191,7 @@ static void wspr_transmit(void) {
     // Refuse to transmit if essential parameters are missing
     if (snap_callsign[0] == '\0' || snap_locator[0] == '\0') {
         ESP_LOGE(TAG, "TX skipped: callsign or locator is empty");
-        g_pre_armed = false; // [MODIFIED - BUG 4 FIX] clear pre-arm on early exit
+        g_pre_armed = false; // clear pre-arm on early exit
         return;
     }
 
@@ -251,7 +263,8 @@ static void wspr_transmit(void) {
     oscillator_tx_begin();
     oscillator_enable(true);
     g_tx_active = true;
-    uint32_t tx_start_us = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL);
+    //  Use timer_us32() so all elapsed reads share the same truncation epoch.
+    uint32_t tx_start_us = timer_us32();
 
     ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d pre_armed=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
              (unsigned long)config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)snap_parity,
@@ -279,11 +292,23 @@ static void wspr_transmit(void) {
         // Use coarse sleep for most of the wait, then busy-wait the last millisecond.
         uint32_t target_x3 = (uint32_t)(i + 1) * WSPR_PERIOD_3X_US;
         for (;;) {
-            uint32_t elapsed = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL) - tx_start_us;
+            // Use timer_us32() for consistent 32-bit epoch
+            // subtraction.  Unsigned subtraction wraps correctly across the 32-bit
+            // rollover boundary (~71.6 min after boot), so this is safe for the full
+            // 110-second WSPR frame regardless of when in the uptime it starts.
+            uint32_t elapsed = timer_us32() - tx_start_us;
 
             if (elapsed * 3UL >= target_x3)
                 break;
-            uint32_t rem_x3 = target_x3 - elapsed * 3UL;
+            // Guard against unsigned wraparound in rem_x3.
+            // Without this clamp, if elapsed*3UL equals or exceeds target_x3 between
+            // the break-check above and this line (possible with preemption jitter),
+            // the subtraction would underflow to ~4 billion, making rem_us ~1.4 billion
+            // and sleep_ms ~1.4 million -- stalling the TX loop for ~24 days.
+            // The guard converts that race window to rem_x3=0, which falls through to
+            // the taskYIELD path and exits on the next iteration's break check.
+            uint32_t elapsed_x3 = elapsed * 3UL;
+            uint32_t rem_x3 = (elapsed_x3 < target_x3) ? (target_x3 - elapsed_x3) : 0u;
             uint32_t rem_us = rem_x3 / 3UL;
             if (rem_us > 10000u) {
                 // More than 10 ms remaining: sleep most of it, keep 5 ms margin
@@ -305,7 +330,7 @@ static void wspr_transmit(void) {
 #if CONFIG_WSPR_SYMBOL_OVERRUN_LOG
         // Warn if the actual symbol boundary was missed by more than 10 ms
         {
-            uint32_t actual_us = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFULL) - tx_start_us;
+            uint32_t actual_us = timer_us32() - tx_start_us;
             uint32_t deadline_us = target_x3 / 3UL;
             if (actual_us > deadline_us + 10000u) {
                 ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lu actual=%lu overrun=%lu us", i, (unsigned long)deadline_us, (unsigned long)actual_us,
@@ -416,7 +441,9 @@ static void scheduler_task(void *arg) {
 
     uint32_t last_hop_ts = 0;
     // Duty-cycle accumulator: TX fires when accum >= 100; 20% default = fire every 5 slots
-    uint16_t s_duty_accum = 100u;
+    // start at 0 so the first slot obeys the duty-cycle contract.
+    // With 100u the first slot always transmitted regardless of the configured %.
+    uint16_t s_duty_accum = 0u;
     bool time_synced_logged = false;
 
     while (1) {
@@ -583,6 +610,12 @@ static void scheduler_task(void *arg) {
                     uint32_t new_base_hz = config_band_freq_hz((iaru_region_t)new_region, (wspr_band_t)g_band_idx) + 1500u;
                     if (new_base_hz != g_pre_arm_base_hz) {
                         g_pre_arm_base_hz = new_base_hz;
+                        // Disable RF before reprogramming frequency and
+                        // switching the LPF relay to prevent any brief cross-band
+                        // emission during the relay transition.  The oscillator is
+                        // not actively transmitting here (oscillator_tx_begin has not
+                        // been called yet), but this is a defensive safety measure.
+                        oscillator_enable(false);
                         oscillator_set_freq(g_pre_arm_base_hz);
                         gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
                         vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
@@ -654,7 +687,7 @@ void app_main(void) {
 
     // Auto-detect oscillator hardware (Si5351 via I2C, then AD9850 via GPIO)
     ESP_ERROR_CHECK(oscillator_init());
-    oscillator_enable(false);  // ensure RF output is off at startup
+    oscillator_enable(false); // ensure RF output is off at startup
 
     // Apply any stored crystal calibration offset
     oscillator_set_cal(g_cfg.xtal_cal_ppb);

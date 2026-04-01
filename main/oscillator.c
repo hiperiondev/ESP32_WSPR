@@ -350,6 +350,18 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Guard against zero frequency at function entry.
+    // If freq_hz is 0, eff_hz stays 0 through all 7 iterations of the R-divider
+    // doubling loop (0 * 2 == 0 always), so the loop exits with eff_hz still 0.
+    // The subsequent vco_cal / eff_hz then triggers a fatal Xtensa divide-by-zero
+    // hardware exception (no C undefined-behavior sanitizer catches this on-target).
+    // The in-loop "eff_hz == 0" check only detects non-zero values that wrap to 0
+    // on overflow; it cannot catch the zero-at-entry case.
+    if (freq_hz == 0u) {
+        ESP_LOGE(TAG, "SI5351: zero frequency requested");
+        return ESP_ERR_INVALID_ARG;
+    }
+
     // Apply crystal calibration: shift the effective VCO by the ppb correction.
     // A positive ppb means the crystal runs fast, so we lower the effective VCO
     // to compensate and produce the correct output frequency.
@@ -846,10 +858,23 @@ esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz) {
         uint32_t frac_mhz = (uint32_t)frac_mhz_s;
         _ad_last_hz = out_hz;
         _ad_last_frac = frac_mhz;
-        // Compute integer-Hz FTW then add the milli-Hz fractional increment
+        // Compute integer-Hz FTW then add the milli-Hz fractional increment.
+        // Use _ad_ftw_int_per_hz_cal (calibrated at runtime by
+        // oscillator_set_cal()) instead of the compile-time AD9850_FTW_FRAC_PER_MHZ_NUM
+        // which embeds the uncalibrated AD9850_FTW_INT_PER_HZ constant.
+        // After a ppb calibration, _ad_ftw_int_per_hz_cal diverges from
+        // AD9850_FTW_INT_PER_HZ; using the uncalibrated constant would apply
+        // a slightly wrong FTW delta for each mHz tone offset, causing systematic
+        // tone-frequency errors proportional to both the ppb correction and the
+        // mHz offset. The calibrated numerator is computed at runtime as:
+        //   _ad_ftw_int_per_hz_cal * AD9850_FTW_FRAC_DEN + AD9850_FTW_FRAC_NUM
+        // AD9850_FTW_FRAC_DEN (10000) and AD9850_FTW_FRAC_NUM are invariant.
+        // Overflow check: max _ad_ftw_int_per_hz_cal ~34, *10000 = 340000,
+        // +3597 = 343597; *frac_mhz_max(999) = 343,253,403 < 2^32. Safe.
         uint32_t fw = ad9850_freq_word(out_hz);
+        uint32_t ad_ftw_frac_num_cal = _ad_ftw_int_per_hz_cal * AD9850_FTW_FRAC_DEN + AD9850_FTW_FRAC_NUM;
+        fw += (frac_mhz * ad_ftw_frac_num_cal) / AD9850_FTW_FRAC_PER_MHZ_DEN;
 
-        fw += (frac_mhz * AD9850_FTW_FRAC_PER_MHZ_NUM) / AD9850_FTW_FRAC_PER_MHZ_DEN;
         ad9850_write_word(fw, 0u);
     }
 

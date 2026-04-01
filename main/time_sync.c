@@ -230,7 +230,7 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     int yy = (tok[4] - '0') * 10 + (tok[5] - '0') + 2000;
 
     // Reject clearly invalid or rollover years
-    if (yy < 2020 || yy > 2035)
+    if (yy < 2020 || yy > 2099)
         return false;
 
     struct tm t = { 0 };
