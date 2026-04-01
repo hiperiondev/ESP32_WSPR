@@ -296,6 +296,34 @@ static esp_err_t si_write_ms0_integer(uint32_t d_int, uint8_t r_div_reg) {
     return si_write_bulk(SI5351_MS0_BASE, regs, 8);
 }
 
+// Pure 32-bit helper: compute floor(vco_rem * pll_c / xtal).
+// Algorithm: binary long division producing 20 quotient bits (pll_c = 2^20 - 1).
+//   Each step: scaled_rem *= 2; if >= xtal, set bit and subtract xtal.
+//   scaled_rem < xtal always, so scaled_rem*2 < 2*40e6 = 80e6 < 2^27 -- no overflow.
+//   After 20 steps, result = floor(vco_rem * 2^20 / xtal).
+//   Adjust for pll_c = 2^20-1 (not 2^20): subtract 1 when final remainder < vco_rem.
+//   Max error vs 64-bit rounded result: 1 LSB = xtal/pll_c <= 38 mHz.
+//   WSPR tone spacing = 1464 mHz, so the error is negligible.
+static uint32_t si_muldiv_pllb_32(uint32_t vco_rem, uint32_t xtal) {
+    uint32_t scaled_rem = vco_rem;
+    uint32_t result = 0;
+    int i;
+    // 20 iterations: compute floor(vco_rem * 2^20 / xtal) via shift-and-subtract
+    for (i = 19; i >= 0; i--) {
+        scaled_rem <<= 1; // safe: scaled_rem < xtal <= 40e6; *2 <= 80e6 < 2^27
+        if (scaled_rem >= xtal) {
+            result |= (1u << i);
+            scaled_rem -= xtal;
+        }
+    }
+    // Correct for pll_c = 2^20-1 vs the 2^20 implied by 20-bit binary division.
+    // floor(vco_rem*(2^20-1)/xtal) = floor(vco_rem*2^20/xtal) - (remainder < vco_rem ? 1 : 0)
+    if (scaled_rem < vco_rem) {
+        result--;
+    }
+    return result;
+}
+
 /**
  * @brief Pre-compute all parameters needed to shift WSPR tones for a given band.
  *
@@ -381,10 +409,19 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     // The PLL VCO target is eff_hz * d_int; the fractional part comes from the
     // remainder when dividing VCO_target by xtal_Hz.
     uint32_t pll_c = 1048575UL;
-    uint64_t vco_target = (uint64_t)eff_hz * (uint64_t)d_int;
-    uint32_t pll_a = (uint32_t)(vco_target / (uint64_t)_si_xtal);
-    uint64_t vco_remainder = vco_target - (uint64_t)pll_a * (uint64_t)_si_xtal;
-    uint32_t pll_b_base = (uint32_t)((vco_remainder * (uint64_t)pll_c + (uint64_t)_si_xtal / 2ULL) / (uint64_t)_si_xtal);
+    // Compute vco_target in pure 32-bit.
+    // PROOF it fits: eff_hz * d_int ≈ vco_cal ≈ 870 MHz.
+    // Upper bound: eff_hz*d_int <= vco_cal + eff_hz <= 870,087,000 + 28,127,600 = 898,214,600
+    // 898,214,600 < 2^30 (1,073,741,824) -- safe for uint32_t.
+    uint32_t vco_target = eff_hz * d_int;
+    uint32_t pll_a = vco_target / _si_xtal;
+    uint32_t vco_remainder = vco_target - pll_a * _si_xtal;
+    // Compute pll_b_base via pure 32-bit binary long division.
+    // si_muldiv_pllb_32() replaces (vco_remainder * pll_c + xtal/2) / xtal which
+    // requires 64-bit intermediate (vco_remainder * 1048575 up to ~41.9e12).
+    // Max error vs original rounded 64-bit result: 1 LSB (floor vs round, diff <= 1).
+    // 1 LSB = xtal/pll_c = 23.8 mHz (25 MHz xtal) -- negligible vs 1464 mHz tone step.
+    uint32_t pll_b_base = si_muldiv_pllb_32(vco_remainder, _si_xtal);
     if (pll_b_base >= pll_c)
         pll_b_base = pll_c - 1u;
 
@@ -898,7 +935,7 @@ esp_err_t oscillator_set_cal(int32_t ppb) {
         uint32_t ftw_hz_q = AD9850_FTW_INT_PER_HZ / 1000u;
         uint32_t ftw_hz_r = AD9850_FTW_INT_PER_HZ % 1000u;
         uint32_t delta_per_hz = ftw_hz_q * ppb_q + (ftw_hz_q * ppb_r) / 1000u + (ftw_hz_r * ppb_q) / 1000u;
-		
+
         if (ppb > 0) {
             // Crystal runs fast: reduce FTW to output a lower (corrected) frequency
             _ad_ftw_per_mhz_cal = AD9850_FTW_PER_MHZ - delta_per_mhz;
