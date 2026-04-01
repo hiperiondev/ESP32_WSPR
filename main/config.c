@@ -17,10 +17,17 @@
 #include "config.h"
 
 static const char *TAG = "config";
+
+// NVS namespace used to group all WSPR configuration keys
 #define NVS_NS "wspr"
 
+// Set to true when config_load() falls back to defaults due to schema mismatch
 static bool _was_reset = false;
 
+// WSPR dial frequencies in Hz, indexed as [iaru_region - 1][wspr_band_t].
+// All bands are identical worldwide except 60 m, which differs per IARU region
+// to avoid interference with local secondary services in each ITU zone.
+// Source: IARU Region 1/2/3 band plans and WSPR operating conventions.
 const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     // -- Region 1: Europe, Africa, Middle East --
     {
@@ -69,10 +76,16 @@ const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     },
 };
 
+// Human-readable band name strings, indexed by wspr_band_t
 const char *BAND_NAME[BAND_COUNT] = {
     "2200m", "630m", "160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m",
 };
 
+// Maps each WSPR band to a 3-bit hardware filter bank address (0-7).
+// The three address bits drive GPIO_A/B/C to select one of 8 LPF relay sections.
+// Groups of nearby bands share the same filter when their frequencies are close
+// enough to be served by a single LC low-pass filter design.
+// Adjust this table if the physical relay board wiring differs from the default.
 const uint8_t BAND_FILTER[BAND_COUNT] = {
     0, // 2200m -> filter 0
     0, // 630m  -> filter 0
@@ -88,11 +101,13 @@ const uint8_t BAND_FILTER[BAND_COUNT] = {
     7, // 10m   -> filter 7
 };
 
+// Compile-time checks: default callsign and locator lengths must fit their fields
 static_assert(sizeof(CONFIG_WSPR_DEFAULT_CALLSIGN) <= CALLSIGN_LEN, "Default callsign too long for CALLSIGN_LEN");
 static_assert(sizeof(CONFIG_WSPR_DEFAULT_LOCATOR) == 5 || sizeof(CONFIG_WSPR_DEFAULT_LOCATOR) == 7,
               "Default locator must be 4 characters (DDLL) or 6 characters (DDLLSS)");
 
 void config_defaults(wspr_config_t *cfg) {
+    // Zero the entire structure first to avoid stale padding bytes in the NVS blob
     memset(cfg, 0, sizeof(*cfg));
     cfg->version = CONFIG_SCHEMA_VERSION;
     strncpy(cfg->callsign, CONFIG_WSPR_DEFAULT_CALLSIGN, CALLSIGN_LEN - 1);
@@ -100,18 +115,22 @@ void config_defaults(wspr_config_t *cfg) {
     cfg->power_dbm = CONFIG_WSPR_DEFAULT_POWER_DBM;
     strncpy(cfg->ntp_server, "pool.ntp.org", sizeof(cfg->ntp_server) - 1);
     cfg->hop_enabled = false;
-    cfg->hop_interval_sec = 120;
+    cfg->hop_interval_sec = 120; // minimum is one full WSPR TX slot (110.6 s rounded up)
     cfg->tx_enabled = false;
+    // Enable 40 m and 20 m by default — the two most popular WSPR bands worldwide
     cfg->band_enabled[BAND_40M] = true;
     cfg->band_enabled[BAND_20M] = true;
+    // 20 % duty cycle: transmit 1 in 5 slots, the WSPR recommended default
     cfg->tx_duty_pct = 20;
     cfg->xtal_cal_ppb = 0;
     cfg->iaru_region = (uint8_t)IARU_REGION_1;
+    // Runtime-only flags: not stored in NVS, always reset to clean state
     cfg->bands_changed = false;
     cfg->tx_slot_parity = 0;
 }
 
 esp_err_t config_init(void) {
+    // Initialize NVS flash; erase and re-init if the partition is full or version-changed
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "NVS needs erase");
@@ -122,11 +141,13 @@ esp_err_t config_init(void) {
 }
 
 esp_err_t config_load(wspr_config_t *cfg) {
+    // Always start with a fully valid default structure
     config_defaults(cfg);
 
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
+        // First boot or erased flash: use defaults silently
         ESP_LOGI(TAG, "No saved config, using defaults");
         return ESP_OK;
     }
@@ -138,6 +159,7 @@ esp_err_t config_load(wspr_config_t *cfg) {
     nvs_close(h);
 
     if (err == ESP_ERR_NVS_NOT_FOUND) {
+        // Namespace exists but the blob key is absent: use defaults
         config_defaults(cfg);
         return ESP_OK;
     }
@@ -147,6 +169,7 @@ esp_err_t config_load(wspr_config_t *cfg) {
         return err;
     }
 
+    // Schema size check: a size mismatch means the struct layout changed
     if (sz != sizeof(*cfg)) {
         ESP_LOGW(TAG, "Config blob size mismatch (stored=%u expected=%u), using defaults", (unsigned)sz, (unsigned)sizeof(*cfg));
         config_defaults(cfg);
@@ -154,6 +177,7 @@ esp_err_t config_load(wspr_config_t *cfg) {
         return ESP_OK;
     }
 
+    // Schema version check: reject blobs from older firmware builds
     if (cfg->version != CONFIG_SCHEMA_VERSION) {
         ESP_LOGW(TAG, "Config schema mismatch (stored=%u expected=%u), using defaults", cfg->version, (unsigned)CONFIG_SCHEMA_VERSION);
         config_defaults(cfg);
@@ -161,18 +185,22 @@ esp_err_t config_load(wspr_config_t *cfg) {
         return ESP_OK;
     }
 
+    // Force NUL-termination on all string fields regardless of stored content
     cfg->callsign[CALLSIGN_LEN - 1] = '\0';
     cfg->locator[LOCATOR_LEN - 1] = '\0';
     cfg->wifi_ssid[sizeof(cfg->wifi_ssid) - 1] = '\0';
     cfg->wifi_pass[sizeof(cfg->wifi_pass) - 1] = '\0';
     cfg->ntp_server[sizeof(cfg->ntp_server) - 1] = '\0';
 
+    // Clamp IARU region: values outside 1-3 are invalid (memset-zero would give 0)
     if (cfg->iaru_region < 1 || cfg->iaru_region > 3)
         cfg->iaru_region = (uint8_t)IARU_REGION_1;
 
+    // Enforce minimum hop interval: one full WSPR TX slot = 110.6 s, rounded to 120 s
     if (cfg->hop_interval_sec < 120u)
         cfg->hop_interval_sec = 120u;
 
+    // Runtime-only fields: always start fresh, do not persist across reboots
     cfg->bands_changed = false;
     cfg->tx_slot_parity = 0;
 
@@ -182,6 +210,7 @@ esp_err_t config_load(wspr_config_t *cfg) {
 }
 
 esp_err_t config_save(const wspr_config_t *cfg) {
+    // Write the entire config struct as a single NVS blob for atomic persistence
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK)
@@ -189,7 +218,7 @@ esp_err_t config_save(const wspr_config_t *cfg) {
 
     err = nvs_set_blob(h, "cfg", cfg, sizeof(*cfg));
     if (err == ESP_OK)
-        err = nvs_commit(h);
+        err = nvs_commit(h); // flush to flash before closing
     nvs_close(h);
 
     ESP_LOGI(TAG, "Config saved: cs=%s loc=%s pwr=%d dBm region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (int)cfg->iaru_region);

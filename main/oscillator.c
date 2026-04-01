@@ -22,55 +22,97 @@
 
 static const char *TAG = "oscillator";
 
+// Runtime oscillator type selected during oscillator_init()
 typedef enum {
-    OSC_NONE = 0,
-    OSC_SI5351 = 1,
-    OSC_AD9850 = 2,
+    OSC_NONE = 0,   // no hardware detected; all operations are no-ops
+    OSC_SI5351 = 1, // Silicon Labs Si5351A clock generator (I2C)
+    OSC_AD9850 = 2, // Analog Devices AD9850 DDS synthesizer (bit-bang serial)
 } osc_type_t;
 
 static osc_type_t _osc_type = OSC_NONE;
-static bool _osc_hw_ok = false;
-static volatile bool _osc_tx_active = false;
+static bool _osc_hw_ok = false;              // true when real hardware was detected
+static volatile bool _osc_tx_active = false; // true during a WSPR symbol loop
+// Deferred calibration: stores a ppb value received while TX is in progress
 static bool _cal_pending = false;
 static int32_t _cal_pending_ppb = 0;
 
 // =============================================================================
 //  SI5351 Driver
 // =============================================================================
+//
+// The Si5351A is a programmable clock generator from Silicon Labs.
+// Architecture: XTAL -> PLL (feedback Multisynth, VCO 600-900 MHz) -> Output Multisynth
+//               -> optional R-divider -> CLK0 output pin.
+//
+// For WSPR the strategy is:
+//   1. Fix the output Multisynth (MS0) to an even integer divider for low jitter.
+//   2. Vary the PLL fractional numerator (b) between symbols to produce the
+//      sub-Hz tone offsets required by WSPR (1.4648 Hz steps).
+//   This avoids resetting the PLL on every symbol, which would cause a phase
+//   discontinuity and glitch.  Keeping MS0 integer and dithering only the PLL
+//   numerator produces continuous-phase FSK as required by the WSPR protocol.
+//
+// References:
+//   - Si5351A datasheet (Skyworks)
+//   - AN619: Manually Generating an Si5351 Register Map
 
-#define SI5351_ADDR              0x60
-#define SI5351_CLK0_CTRL         16
-#define SI5351_PLLA_MSNA         26
-#define SI5351_MS0_BASE          42
-#define SI5351_PLL_RESET         177
-#define SI5351_OUTPUT_EN         3
-#define SI5351_CLK0_MS0_SRC_PLLA 0x0C
+// I2C address of the Si5351A (factory default, not configurable)
+#define SI5351_ADDR 0x60
+// Register addresses (from Si5351 datasheet Table 1)
+#define SI5351_CLK0_CTRL         16   // CLK0 control: power, invert, source, drive
+#define SI5351_PLLA_MSNA         26   // PLLA Multisynth (feedback) registers 26-33
+#define SI5351_MS0_BASE          42   // Multisynth0 (output) registers 42-49
+#define SI5351_PLL_RESET         177  // PLL reset register; bit 5 = reset PLLA
+#define SI5351_OUTPUT_EN         3    // Output enable control register
+#define SI5351_CLK0_MS0_SRC_PLLA 0x0C // CLK0 sourced from PLLA, integer mode bit
 
+// Drive current selection for CLK0 output (bits 1:0 of CLK0 control register)
 #if defined(CONFIG_SI5351_DRIVE_2MA)
-#define SI5351_IDRV 0x00u
+#define SI5351_IDRV 0x00u // 2 mA ~ +3 dBm into 50 Ω
 #elif defined(CONFIG_SI5351_DRIVE_4MA)
-#define SI5351_IDRV 0x01u
+#define SI5351_IDRV 0x01u // 4 mA ~ +7 dBm into 50 Ω
 #elif defined(CONFIG_SI5351_DRIVE_6MA)
-#define SI5351_IDRV 0x02u
+#define SI5351_IDRV 0x02u // 6 mA ~ +10 dBm into 50 Ω
 #else
-#define SI5351_IDRV 0x03u
+#define SI5351_IDRV 0x03u // 8 mA ~ +13 dBm into 50 Ω (default)
 #endif
+// Complete CLK0 control byte: PLLA source (bits 3:2) | drive current (bits 1:0)
 #define SI5351_CLK0_CTRL_VAL (0x0Cu | SI5351_IDRV)
 
+// Crystal frequency and runtime state for the Si5351 driver
 static uint32_t _si_xtal = (uint32_t)CONFIG_SI5351_XTAL_FREQ;
-static uint32_t _si_vco = 0;
-static int32_t _si_cal = 0;
+static uint32_t _si_vco = 0; // VCO frequency computed by si_init_pll()
+static int32_t _si_cal = 0;  // crystal calibration offset in ppb
 
+// I2C bus and device handles (ESP-IDF new I2C master API)
 static i2c_master_bus_handle_t si_bus_handle = NULL;
 static i2c_master_dev_handle_t si_dev_handle = NULL;
 
+/**
+ * @brief Write a single byte to an Si5351 register over I2C.
+ * @param reg Register address.
+ * @param val Byte value to write.
+ * @return ESP_OK on success.
+ */
 static esp_err_t si_write(uint8_t reg, uint8_t val) {
     uint8_t data[2] = { reg, val };
     return i2c_master_transmit(si_dev_handle, data, 2, pdMS_TO_TICKS(100));
 }
 
+/**
+ * @brief Write a block of consecutive Si5351 registers in a single I2C transaction.
+ *
+ * Packs the register address and data bytes into a local buffer and sends them
+ * in one I2C transfer to minimise bus overhead. Limited to 8 data bytes because
+ * all Si5351 register blocks relevant to WSPR (MSNA and MS0) are 8 bytes wide.
+ *
+ * @param reg  Starting register address.
+ * @param buf  Data bytes to write.
+ * @param len  Number of bytes (must be <= 8).
+ * @return ESP_OK on success, ESP_ERR_INVALID_SIZE if len > 8.
+ */
 static esp_err_t si_write_bulk(uint8_t reg, const uint8_t *buf, int len) {
-    uint8_t data[9];
+    uint8_t data[9]; // 1 address byte + up to 8 data bytes
     if (len + 1 > (int)sizeof(data)) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -79,24 +121,51 @@ static esp_err_t si_write_bulk(uint8_t reg, const uint8_t *buf, int len) {
     return i2c_master_transmit(si_dev_handle, data, (size_t)(len + 1), pdMS_TO_TICKS(100));
 }
 
+/**
+ * @brief Probe the Si5351 by reading register 0 via I2C.
+ *
+ * A successful ACK on the write and a valid read response confirms that
+ * an Si5351A is present on the I2C bus at address 0x60.
+ *
+ * @return ESP_OK if the device responded; an I2C error code otherwise.
+ */
 static esp_err_t si5351_ping(void) {
     uint8_t reg = 0x00;
     uint8_t dummy = 0;
     return i2c_master_transmit_receive(si_dev_handle, &reg, 1, &dummy, 1, pdMS_TO_TICKS(200));
 }
 
+/**
+ * @brief Compute and program the PLLA integer-only feedback Multisynth (MSNA).
+ *
+ * The Si5351 VCO must operate in the range 600-900 MHz (per datasheet).
+ * This function selects the smallest integer multiplier 'a' that keeps
+ * VCO = a * xtal inside that window, then programs the MSNA registers
+ * with b=0, c=1 (pure integer mode) for minimum jitter.
+ *
+ * AN619 Equation for MSNA integer mode:
+ *   P1 = 128 * a - 512
+ *   P2 = 0  (b = 0)
+ *   P3 = 1  (c = 1)
+ * Written to registers 26-33 (MSNA base).
+ *
+ * @return ESP_OK on success; ESP_ERR_INVALID_ARG if xtal is out of range.
+ */
 static esp_err_t si_init_pll(void) {
+    // Verify crystal is within the Si5351 supported input range
     if (_si_xtal < 10000000UL || _si_xtal > 40000000UL) {
         ESP_LOGE(TAG, "SI5351: xtal %lu Hz out of supported range 10-40 MHz", (unsigned long)_si_xtal);
         return ESP_ERR_INVALID_ARG;
     }
     uint32_t xtal_mhz = _si_xtal / 1000000UL;
+    // Choose multiplier 'a' to target ~875 MHz VCO (mid-range for headroom)
     uint32_t a = 875UL / xtal_mhz;
     if (a < 15UL)
-        a = 15UL;
+        a = 15UL; // MSNA minimum integer multiplier per AN619
     if (a > 90UL)
-        a = 90UL;
+        a = 90UL; // MSNA maximum integer multiplier per AN619
     _si_vco = a * xtal_mhz * 1000000UL;
+    // P1 for integer-only PLL: P1 = 128*a - 512, P2=0, P3=1 (b=0, c=1)
     uint32_t p1 = 128UL * a - 512UL;
     uint8_t pll_regs[8] = {
         0x00, 0x01, (uint8_t)((p1 >> 16) & 0x03), (uint8_t)((p1 >> 8) & 0xFF), (uint8_t)(p1 & 0xFF), 0x00, 0x00, 0x00,
@@ -104,11 +173,17 @@ static esp_err_t si_init_pll(void) {
     esp_err_t err = si_write_bulk(SI5351_PLLA_MSNA, pll_regs, 8);
     if (err != ESP_OK)
         return err;
+    // Reset PLLA to lock to the new multiplier (bit 5 of register 177)
     err = si_write(SI5351_PLL_RESET, 0x20);
     ESP_LOGI(TAG, "SI5351 PLL locked: xtal=%lu Hz a=%lu vco=%lu Hz", (unsigned long)_si_xtal, (unsigned long)a, (unsigned long)_si_vco);
     return err;
 }
 
+// Band parameter cache for the Si5351 tone-generation scheme.
+// Pre-computed once per band change in si_cache_band(); used in si_apply_tone()
+// to update only the PLL fractional numerator (b) without touching the divider.
+// This avoids the PLL reset glitch that would occur if we reprogrammed everything
+// on each of the 162 WSPR symbols.
 typedef struct {
     uint32_t d_int;      // even integer output divider (MS0 set to integer mode)
     uint32_t pll_a;      // PLL integer multiplier: VCO = xtal * (a + b/c)
@@ -125,8 +200,22 @@ typedef struct {
 } si5351_band_cache_t;
 
 static si5351_band_cache_t _si_cache = { 0 };
-static uint32_t _si_last_set_hz = 0u;
+static uint32_t _si_last_set_hz = 0u; // avoids re-running si_cache_band() on repeated calls
 
+/**
+ * @brief Write all 8 PLL Multisynth (MSNA) registers for fractional mode.
+ *
+ * Computes AN619 parameters P1, P2, P3 from the a+b/c fractional divider
+ * and writes them to registers 26-33.
+ * P1 = 128*a + floor(128*b/c) - 512
+ * P2 = 128*b - c * floor(128*b/c)
+ * P3 = c
+ *
+ * @param pll_a Integer part of the PLL multiplier (15-90).
+ * @param pll_b Fractional numerator (0 to pll_c-1).
+ * @param pll_c Fractional denominator (typically 1048575 for max resolution).
+ * @return ESP_OK on success.
+ */
 static esp_err_t si_write_pll_regs(uint32_t pll_a, uint32_t pll_b, uint32_t pll_c) {
     uint32_t floor_128b_c = (128u * pll_b) / pll_c; // floor(128*b/c), 32-bit
     uint32_t p1 = 128u * pll_a + floor_128b_c - 512u;
@@ -140,6 +229,23 @@ static esp_err_t si_write_pll_regs(uint32_t pll_a, uint32_t pll_b, uint32_t pll_
     return si_write_bulk(SI5351_PLLA_MSNA, regs, 8);
 }
 
+/**
+ * @brief Write only P1 and P2 PLL register fields (skip P3 / denominator).
+ *
+ * During WSPR symbol transmission, only the PLL numerator (b) changes between
+ * symbols; the denominator (c = P3) is constant for the entire transmission.
+ * Updating only the 6 bytes that encode P1 and P2 halves the I2C traffic per
+ * symbol compared to writing all 8 bytes and avoids touching the P3 field,
+ * which would needlessly interrupt the PLL phase-lock loop.
+ *
+ * Writes to MSNA registers 28-33 (skipping registers 26-27 which hold P3[15:8]
+ * and P3[7:0] — the denominator that doesn't change between tones).
+ *
+ * @param pll_a Integer part of the PLL multiplier.
+ * @param pll_b New fractional numerator for this tone.
+ * @param pll_c Fractional denominator (unchanged; used only for the calculation).
+ * @return ESP_OK on success.
+ */
 static esp_err_t si_write_pll_p1p2_only(uint32_t pll_a, uint32_t pll_b, uint32_t pll_c) {
     uint32_t floor_128b_c = (128u * pll_b) / pll_c;
     uint32_t p1 = 128u * pll_a + floor_128b_c - 512u;
@@ -150,9 +256,24 @@ static esp_err_t si_write_pll_p1p2_only(uint32_t pll_a, uint32_t pll_b, uint32_t
         (uint8_t)((p2 >> 8) & 0xFFu),  (uint8_t)(p2 & 0xFFu),
     };
 
+    // Start write at MSNA+2 (register 28) to skip the P3 bytes
     return si_write_bulk(SI5351_PLLA_MSNA + 2u, regs, 6);
 }
 
+/**
+ * @brief Program the MS0 output Multisynth in integer mode with an R-divider.
+ *
+ * Sets MS0 to integer mode (MS0_INT bit = 1, b=0, c=1) for minimum jitter.
+ * The R-divider extends the frequency range down to 8 kHz by dividing the
+ * MS0 output by 2^r_div_reg (1, 2, 4, 8, 16, 32, 64, or 128).
+ *
+ * AN619 P1 for integer-only MS0: P1 = 128*d_int - 512  (b=0 → floor(128*0/1)=0)
+ * Register 44 also holds the MS0_INT flag (bit 6) and r_div_reg (bits [6:4]).
+ *
+ * @param d_int     Even integer output divider (8-2048 even, or 4/6/8).
+ * @param r_div_reg R-divider exponent 0-7 (output division = 2^r_div_reg).
+ * @return ESP_OK on success.
+ */
 static esp_err_t si_write_ms0_integer(uint32_t d_int, uint8_t r_div_reg) {
     uint32_t p1 = 128u * d_int - 512u;
     uint8_t regs[8] = {
@@ -170,12 +291,35 @@ static esp_err_t si_write_ms0_integer(uint32_t d_int, uint8_t r_div_reg) {
     return si_write_bulk(SI5351_MS0_BASE, regs, 8);
 }
 
+/**
+ * @brief Pre-compute all parameters needed to shift WSPR tones for a given band.
+ *
+ * Called once when the transmit frequency changes (band hop or first use).
+ * Computes the best even-integer MS0 divider and the fractional PLL parameters
+ * that place the carrier at freq_hz, then caches the incremental delta_b
+ * value that must be added per milli-Hz of tone offset.
+ *
+ * The key insight for WSPR: each 4-FSK tone is only ~1.46 Hz away from the
+ * previous one, so instead of recomputing full PLL parameters per symbol,
+ * we compute a linear approximation delta_b = d_int * pll_c / xtal_hz and
+ * add scaled multiples of it to pll_b_base for each symbol.  This keeps the
+ * per-symbol I2C write to just 6 bytes (P1 + P2 fields only).
+ *
+ * Crystal calibration (ppb) is applied by scaling the effective VCO frequency
+ * before the divider calculation, so the output frequency tracks the correction.
+ *
+ * @param freq_hz  Desired carrier frequency in Hz (base tone, no offset yet).
+ * @return ESP_OK on success; error code if frequency is out of Si5351 range.
+ */
 static esp_err_t si_cache_band(uint32_t freq_hz) {
     if (_si_vco == 0) {
         ESP_LOGE(TAG, "SI5351: PLL not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Apply crystal calibration: shift the effective VCO by the ppb correction.
+    // A positive ppb means the crystal runs fast, so we lower the effective VCO
+    // to compensate and produce the correct output frequency.
     uint32_t vco_cal = _si_vco;
     if (_si_cal != 0) {
         uint32_t vco_khz = _si_vco / 1000u;
@@ -191,6 +335,9 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
         vco_cal = (uint32_t)((int32_t)_si_vco + corr);
     }
 
+    // R-divider: scale up frequencies below 500 kHz by powers of 2 until they
+    // are within the MS0 valid range (500 kHz to 200 MHz).  r_div_reg is the
+    // exponent written to the register; the hardware divides by 2^r_div_reg.
     uint8_t r_div_reg = 0;
     uint32_t eff_hz = freq_hz;
 
@@ -204,11 +351,14 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
         }
     }
 
+    // Compute the output Multisynth divider d_int = VCO / eff_hz.
+    // Force to an even integer: odd dividers add additional jitter in the Si5351.
     uint32_t d_int = vco_cal / eff_hz;
     if (d_int & 1u) {
-        d_int &= ~1u;
+        d_int &= ~1u; // round down to even
     }
 
+    // Clamp to valid MS0 integer-mode range (8-2048 for even values)
     if (d_int < 8UL)
         d_int = 8UL;
 
@@ -218,6 +368,10 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Compute the PLL fractional numerator for the base tone (offset = 0 mHz).
+    // Use c = 1048575 (maximum) for the finest possible frequency resolution.
+    // The PLL VCO target is eff_hz * d_int; the fractional part comes from the
+    // remainder when dividing VCO_target by xtal_Hz.
     uint32_t pll_c = 1048575UL;
     uint64_t vco_target = (uint64_t)eff_hz * (uint64_t)d_int;
     uint32_t pll_a = (uint32_t)(vco_target / (uint64_t)_si_xtal);
@@ -226,19 +380,28 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     if (pll_b_base >= pll_c)
         pll_b_base = pll_c - 1u;
 
+    // Pre-compute the b-increment per milli-Hz of tone offset.
+    // delta_b = d_int * pll_c / xtal_Hz  (per Hz).
+    // Decomposed into integer parts to stay in 32-bit arithmetic at runtime:
+    //   b_step_int   = floor(d_int * pll_c / xtal_Hz)        [per Hz, integer part]
+    //   b_step2_int  = floor(remainder / xtal_kHz)            [per Hz, sub-part]
+    //   b_step2_rem  = remainder % xtal_kHz                   [per Hz, residual]
+    // si_apply_tone() multiplies these by the scaled tone offset in milli-Hz.
     uint32_t xtal_kHz = _si_xtal / 1000UL;
-    uint32_t full_den = xtal_kHz * 1000UL;
+    uint32_t full_den = xtal_kHz * 1000UL; // = xtal_Hz
     uint32_t raw_num = d_int * pll_c;
     uint32_t b_step_int = raw_num / full_den;
     uint32_t b_step_rem1 = raw_num % full_den;
     uint32_t b_step2_int = b_step_rem1 / xtal_kHz;
     uint32_t b_step2_rem = b_step_rem1 % xtal_kHz;
 
+    // Verify the PLL multiplier is within the Si5351 valid range (15-90)
     if (pll_a < 15UL || pll_a > 90UL) {
         ESP_LOGE(TAG, "SI5351: PLL multiplier %lu out of range for eff_hz=%lu d_int=%lu", (unsigned long)pll_a, (unsigned long)eff_hz, (unsigned long)d_int);
         return ESP_ERR_INVALID_ARG;
     }
 
+    // Store all computed values in the cache for use by si_apply_tone()
     _si_cache.d_int = d_int;
     _si_cache.pll_a = pll_a;
     _si_cache.pll_c = pll_c;
@@ -255,37 +418,72 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
              (unsigned long)pll_a, (unsigned long)pll_b_base, (unsigned long)pll_c, (unsigned)r_div_reg, (unsigned long)b_step_int, (unsigned long)b_step2_int,
              (unsigned long)b_step2_rem);
 
+    // Program the output Multisynth divider (MS0) in integer mode with the R-divider
     esp_err_t err = si_write_ms0_integer(d_int, r_div_reg);
     if (err != ESP_OK)
         return err;
 
+    // Program the full PLL Multisynth (MSNA) with the base numerator
     err = si_write_pll_regs(pll_a, pll_b_base, pll_c);
     if (err != ESP_OK)
         return err;
 
+    // Reset PLLA to lock to the new parameters
     return si_write(SI5351_PLL_RESET, 0x20);
 }
 
+/**
+ * @brief Apply a WSPR tone offset to the Si5351 PLL by updating only pll_b.
+ *
+ * Computes the new PLL fractional numerator for the given tone_millihz offset
+ * from the base frequency using the cached b-step values, then writes only the
+ * P1 and P2 register fields (6 bytes) without touching the P3 denominator or
+ * the MS0 divider.  This produces a continuous-phase frequency change with
+ * no PLL glitch, as required by the WSPR 4-FSK modulation scheme.
+ *
+ * The R-divider exponent is factored in by left-shifting tone_millihz:
+ *   scaled_tone = tone_millihz << r_div_reg
+ * because the MS0 R-divider reduces the effective step size by 2^r_div_reg.
+ *
+ * @param tone_millihz  Tone offset in milli-Hz above the base frequency (0 to
+ *                      ~4395 mHz for WSPR tones 0-3: 0, 1465, 2930, 4395 mHz).
+ * @return ESP_OK on success; ESP_ERR_INVALID_STATE if the cache is not valid.
+ */
 static esp_err_t si_apply_tone(uint32_t tone_millihz) {
     if (!_si_cache.valid) {
         ESP_LOGE(TAG, "SI5351: si_apply_tone called before si_cache_band");
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Scale the milli-Hz offset to account for the R-divider
     uint32_t scaled_tone = tone_millihz << _si_cache.r_div_reg;
+
+    // Compute delta_b using the 3-term decomposition to stay within 32-bit arithmetic
     uint32_t delta_b = scaled_tone * _si_cache.b_step_int;
     delta_b += (scaled_tone * _si_cache.b_step2_int) / 1000UL;
     delta_b += (scaled_tone * _si_cache.b_step2_rem) / _si_cache.full_den;
     uint32_t pll_b = _si_cache.pll_b_base + delta_b;
 
+    // Clamp to valid range [0, pll_c - 1]
     if (pll_b >= _si_cache.pll_c) {
         pll_b = _si_cache.pll_c - 1u;
     }
 
+    // Write only the P1+P2 fields; skip P3 (denominator doesn't change)
     return si_write_pll_p1p2_only(_si_cache.pll_a, pll_b, _si_cache.pll_c);
 }
 
+/**
+ * @brief Attempt to detect and initialize the Si5351A clock generator.
+ *
+ * Creates an I2C master bus, adds the Si5351 device at address 0x60,
+ * probes with a register 0 read, then configures CLK0 and locks the PLL.
+ * Cleans up and returns false if any step fails.
+ *
+ * @return true if the Si5351 was found and initialized successfully.
+ */
 static bool si5351_try_init(void) {
+    // Create the I2C master bus on the configured port and GPIO pins
     i2c_master_bus_config_t bus_cfg = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = (i2c_port_t)CONFIG_SI5351_I2C_PORT,
@@ -299,6 +497,7 @@ static bool si5351_try_init(void) {
         ESP_LOGE(TAG, "Failed to create I2C master bus: %s", esp_err_to_name(err));
         return false;
     }
+    // Add the Si5351 device at 400 kHz fast-mode I2C
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = SI5351_ADDR,
@@ -308,9 +507,9 @@ static bool si5351_try_init(void) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add I2C device: %s", esp_err_to_name(err));
         i2c_del_master_bus(si_bus_handle);
-        si_bus_handle = NULL;
         return false;
     }
+    // Probe: read register 0 to confirm the Si5351 is physically present
     esp_err_t probe = si5351_ping();
     if (probe != ESP_OK) {
         ESP_LOGW(TAG, "SI5351 not detected on I2C addr 0x%02X (err=%s)", SI5351_ADDR, esp_err_to_name(probe));
@@ -320,9 +519,12 @@ static bool si5351_try_init(void) {
         si_bus_handle = NULL;
         return false;
     }
+    // Disable all outputs while configuring (register 3: output enable, 1=disabled)
     si_write(3, 0xFF);
     vTaskDelay(pdMS_TO_TICKS(10));
+    // Configure CLK0: source PLLA, integer mode, chosen drive current
     si_write(SI5351_CLK0_CTRL, SI5351_CLK0_CTRL_VAL);
+    // Lock PLLA to the crystal with an integer multiplier
     esp_err_t err_pll = si_init_pll();
     if (err_pll != ESP_OK) {
         ESP_LOGW(TAG, "SI5351 PLL lock failed (err=%s)", esp_err_to_name(err_pll));
@@ -339,27 +541,56 @@ static bool si5351_try_init(void) {
 // =============================================================================
 //  AD9850 Driver
 // =============================================================================
+//
+// The AD9850 is a complete Direct Digital Synthesis (DDS) chip from Analog Devices.
+// It contains a 32-bit phase accumulator, a sine ROM, a 10-bit DAC, and a comparator.
+// The output frequency is set by the Frequency Tuning Word (FTW):
+//
+//   f_out = FTW * f_ref / 2^32
+//
+// Therefore:  FTW = f_out * 2^32 / f_ref
+//
+// With f_ref = 125 MHz:  FTW = f_out * 4294967296 / 125000000
+//                             = f_out * 34.35973...
+// Resolution = f_ref / 2^32 = 125e6 / 4294967296 ≈ 0.0291 Hz per LSB.
+//
+// Programming is done serially: 32 bits of FTW (LSB first) followed by 8 bits
+// of phase/control (LSB first), then a pulse on FQ_UD to latch the new word.
+// The AD9850 has no readback capability; its presence can only be assumed.
+//
+// References:
+//   - AD9850 datasheet, Rev. H (Analog Devices)
 
-#define AD9850_CLK_GPIO   CONFIG_AD9850_CLK_GPIO
-#define AD9850_FQUD_GPIO  CONFIG_AD9850_FQ_UD_GPIO
-#define AD9850_DATA_GPIO  CONFIG_AD9850_DATA_GPIO
-#define AD9850_RESET_GPIO CONFIG_AD9850_RESET_GPIO
-#define AD9850_REF_CLK    CONFIG_AD9850_REF_CLOCK
+#define AD9850_CLK_GPIO   CONFIG_AD9850_CLK_GPIO   // W_CLK: serial shift clock
+#define AD9850_FQUD_GPIO  CONFIG_AD9850_FQ_UD_GPIO // FQ_UD: frequency update strobe
+#define AD9850_DATA_GPIO  CONFIG_AD9850_DATA_GPIO  // D7: serial data input (LSB first)
+#define AD9850_RESET_GPIO CONFIG_AD9850_RESET_GPIO // RESET: active-high master reset
+#define AD9850_REF_CLK    CONFIG_AD9850_REF_CLOCK  // Reference oscillator frequency (Hz)
 
+// Last programmed frequency state (needed to re-enable from power-down)
 static uint32_t _ad_last_hz = 0u;
-static uint32_t _ad_last_frac = 0u;
-static int32_t _ad_cal = 0;
+static uint32_t _ad_last_frac = 0u; // sub-Hz fractional part in milli-Hz / 1000
+static int32_t _ad_cal = 0;         // calibration offset in ppb
+// Critical-section lock for the bit-bang serial interface (called from normal task context)
 static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
 
+// Pre-computed Frequency Tuning Word constants for supported reference clocks.
+// The FTW is split into an integer per-MHz part and a fractional per-Hz part
+// to keep all arithmetic in 32-bit integers and avoid ULL at runtime on ESP32.
+//
+// FTW_PER_MHZ = floor(2^32 / (f_ref / 1e6))
+// FTW_INT_PER_HZ = floor(2^32 / f_ref)
+// FTW_FRAC_NUM / FTW_FRAC_DEN = fractional residual of FTW_INT_PER_HZ
 #if AD9850_REF_CLK == 125000000UL
-#define AD9850_FTW_PER_MHZ    34359738UL
-#define AD9850_FTW_INT_PER_HZ 34UL
+// 125 MHz module (most common): FTW = freq_Hz * 4294967296 / 125000000
+#define AD9850_FTW_PER_MHZ    34359738UL // floor(2^32 / 125) = 34359738.368
+#define AD9850_FTW_INT_PER_HZ 34UL       // floor(2^32 / 125e6)
 #define AD9850_FTW_FRAC_DEN   10000UL
-#define AD9850_FTW_FRAC_NUM   3597UL
+#define AD9850_FTW_FRAC_NUM   3597UL // 0.368 * 10000 ≈ 3597
 #elif AD9850_REF_CLK == 100000000UL
 // 100 MHz module: pre-computed, no ULL at runtime
-#define AD9850_FTW_PER_MHZ    42949672UL
-#define AD9850_FTW_INT_PER_HZ 42UL
+#define AD9850_FTW_PER_MHZ    42949672UL // floor(2^32 / 100)
+#define AD9850_FTW_INT_PER_HZ 42UL       // floor(2^32 / 100e6)
 #define AD9850_FTW_FRAC_DEN   10000UL
 #define AD9850_FTW_FRAC_NUM   9496UL
 #else
@@ -372,16 +603,33 @@ static portMUX_TYPE _ad_mux = portMUX_INITIALIZER_UNLOCKED;
     ((uint32_t)((4294967296ULL - (uint64_t)AD9850_FTW_INT_PER_HZ * (uint32_t)AD9850_REF_CLK) * AD9850_FTW_FRAC_DEN / (uint32_t)AD9850_REF_CLK))
 #endif
 
+// Combined FTW increment per milli-Hz of tone offset, for sub-Hz AD9850 updates
 #define AD9850_FTW_FRAC_PER_MHZ_NUM ((uint32_t)(AD9850_FTW_INT_PER_HZ * AD9850_FTW_FRAC_DEN + AD9850_FTW_FRAC_NUM))
 #define AD9850_FTW_FRAC_PER_MHZ_DEN (1000UL * AD9850_FTW_FRAC_DEN)
 
+// Compile-time sanity check: maximum WSPR frequency FTW must fit in 32 bits
 static_assert((30UL * (4294967296ULL / ((uint32_t)AD9850_REF_CLK / 1000000UL)) + 999999UL * (4294967296ULL / (uint32_t)AD9850_REF_CLK) +
                999999UL * AD9850_FTW_FRAC_NUM / AD9850_FTW_FRAC_DEN) < 0xFFFFFFFFUL,
               "AD9850 FTW overflow: max WSPR frequency word must fit in 32 bits for the configured ref clock");
 
+// Calibrated FTW constants (updated by oscillator_set_cal())
 static uint32_t _ad_ftw_per_mhz_cal = AD9850_FTW_PER_MHZ;
 static uint32_t _ad_ftw_int_per_hz_cal = AD9850_FTW_INT_PER_HZ;
 
+/**
+ * @brief Compute the 32-bit AD9850 Frequency Tuning Word for a given frequency.
+ *
+ * Splits the frequency into integer MHz and sub-MHz Hz parts to keep all
+ * arithmetic in 32-bit integers.  The fractional residual (FTW_FRAC_NUM /
+ * FTW_FRAC_DEN per Hz) is added to correct the truncation error.
+ *
+ * FTW = freq_MHz * FTW_PER_MHZ
+ *      + freq_sub_Hz * FTW_INT_PER_HZ
+ *      + freq_sub_Hz * FTW_FRAC_NUM / FTW_FRAC_DEN
+ *
+ * @param freq_hz  Output frequency in Hz.
+ * @return 32-bit Frequency Tuning Word to load into the AD9850.
+ */
 static uint32_t ad9850_freq_word(uint32_t freq_hz) {
     uint32_t freq_mhz = freq_hz / 1000000UL;    // integer MHz  (0..30)
     uint32_t freq_sub_hz = freq_hz % 1000000UL; // sub-MHz Hz remainder (0..999999)
@@ -393,31 +641,63 @@ static uint32_t ad9850_freq_word(uint32_t freq_hz) {
     return fw;
 }
 
+/**
+ * @brief Pulse a GPIO high then low (one rising+falling edge).
+ * @param gpio GPIO number to pulse.
+ */
 static inline void _pulse(int gpio) {
     gpio_set_level(gpio, 1);
     gpio_set_level(gpio, 0);
 }
 
+/**
+ * @brief Shift a 40-bit word (32-bit FTW + 8-bit phase/control) into the AD9850.
+ *
+ * The AD9850 accepts serial data LSB first on the D7 (DATA) pin, clocked by
+ * rising edges on W_CLK. After all 40 bits are shifted in, a rising edge on
+ * FQ_UD latches the word into the active frequency register.
+ * The entire operation is wrapped in a FreeRTOS critical section to prevent
+ * preemption from corrupting the bit-bang timing.
+ *
+ * @param freq_word 32-bit Frequency Tuning Word.
+ * @param phase     8-bit phase/control byte (bits[7:3] = phase, bit[2] = power-down).
+ *                  Pass 0x00 for normal operation; 0x04 to power down the DAC.
+ */
 static void ad9850_write_word(uint32_t freq_word, uint8_t phase) {
     int i;
     taskENTER_CRITICAL(&_ad_mux);
+    // Shift out 32-bit FTW, LSB first
     for (i = 0; i < 32; i++) {
         gpio_set_level(AD9850_DATA_GPIO, (int)((freq_word >> i) & 1u));
         _pulse(AD9850_CLK_GPIO);
     }
+    // Shift out 8-bit phase/control byte, LSB first
     for (i = 0; i < 8; i++) {
         gpio_set_level(AD9850_DATA_GPIO, (int)((phase >> i) & 1u));
         _pulse(AD9850_CLK_GPIO);
     }
+    // Latch the 40-bit word into the AD9850 frequency register
     _pulse(AD9850_FQUD_GPIO);
     taskEXIT_CRITICAL(&_ad_mux);
 }
 
+/**
+ * @brief Attempt to initialize the AD9850 DDS via GPIO bit-bang.
+ *
+ * The AD9850 has no readback interface, so its presence cannot be confirmed.
+ * When CONFIG_OSCILLATOR_ASSUME_AD9850 is disabled, this function returns false
+ * to allow DUMMY mode on boards without an AD9850 fitted.
+ *
+ * Reset sequence per datasheet: RESET high -> low, then pulse CLK, then pulse FQ_UD.
+ *
+ * @return true if initialization was performed (AD9850 assumed present).
+ */
 static bool ad9850_try_init(void) {
 #if !CONFIG_OSCILLATOR_ASSUME_AD9850
     ESP_LOGW(TAG, "AD9850 assumption disabled in Kconfig -- skipping AD9850 init, entering DUMMY mode");
     return false;
 #else
+    // Configure all four AD9850 control GPIOs as push-pull outputs
     gpio_config_t io_conf = {
         .pin_bit_mask = BIT64(AD9850_CLK_GPIO) | BIT64(AD9850_FQUD_GPIO) | BIT64(AD9850_DATA_GPIO) | BIT64(AD9850_RESET_GPIO),
         .mode = GPIO_MODE_OUTPUT,
@@ -426,10 +706,12 @@ static bool ad9850_try_init(void) {
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&io_conf);
+    // Master reset: assert RESET high for at least 1 ms, then release
     gpio_set_level(AD9850_RESET_GPIO, 1);
     vTaskDelay(pdMS_TO_TICKS(1));
     gpio_set_level(AD9850_RESET_GPIO, 0);
     vTaskDelay(pdMS_TO_TICKS(1));
+    // Clock and FQ_UD pulses complete the serial-mode reset sequence
     _pulse(AD9850_CLK_GPIO);
     _pulse(AD9850_FQUD_GPIO);
 
@@ -443,18 +725,21 @@ static bool ad9850_try_init(void) {
 // =============================================================================
 
 esp_err_t oscillator_init(void) {
+    // Try Si5351 first (I2C ACK confirms hardware presence)
     if (si5351_try_init()) {
         _osc_type = OSC_SI5351;
         _osc_hw_ok = true;
         ESP_LOGI(TAG, "Auto-detected: SI5351");
         return ESP_OK;
     }
+    // Try AD9850 (write-only; assumed present if Kconfig allows it)
     if (ad9850_try_init()) {
         _osc_type = OSC_AD9850;
         _osc_hw_ok = true;
         ESP_LOGI(TAG, "Auto-detected: AD9850 (assumed)");
         return ESP_OK;
     }
+    // No hardware found: enter DUMMY mode (all operations silently succeed)
     _osc_type = OSC_NONE;
     _osc_hw_ok = false;
     ESP_LOGW(TAG, "No oscillator hardware found — DUMMY mode active");
@@ -463,16 +748,19 @@ esp_err_t oscillator_init(void) {
 
 esp_err_t oscillator_set_freq(uint32_t freq_hz) {
     if (_osc_type == OSC_SI5351) {
+        // Avoid redundant si_cache_band() calls if the frequency hasn't changed
         if (freq_hz == _si_last_set_hz && _si_cache.valid) {
-            return si_apply_tone(0u);
+            return si_apply_tone(0u); // reapply base tone (offset = 0)
         }
 
+        // Recompute dividers and PLL parameters for the new band/frequency
         esp_err_t err = si_cache_band(freq_hz);
         if (err == ESP_OK)
             _si_last_set_hz = freq_hz;
         return err;
     }
     if (_osc_type == OSC_AD9850) {
+        // For the AD9850, compute and write the FTW directly
         _ad_last_hz = freq_hz;
         _ad_last_frac = 0u;
         ad9850_write_word(ad9850_freq_word(freq_hz), 0u);
@@ -482,12 +770,17 @@ esp_err_t oscillator_set_freq(uint32_t freq_hz) {
 
 esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz) {
     if (_osc_type == OSC_SI5351) {
-
+        // For Si5351: update only the PLL numerator b for the new tone offset.
+        // The base_hz parameter is not needed here because the band cache already
+        // encodes the base frequency; only the offset changes between WSPR symbols.
         uint32_t tone_mhz = (offset_millihz >= 0) ? (uint32_t)offset_millihz : 0u;
         return si_apply_tone(tone_mhz);
     }
 
     if (_osc_type == OSC_AD9850) {
+        // For AD9850: combine base_hz and milli-Hz offset into a new FTW.
+        // The sub-kHz part of base_hz and the offset are merged carefully to
+        // maintain milli-Hz precision without 64-bit arithmetic at runtime.
         int32_t total_mhz = (int32_t)(base_hz % 1000UL) * 1000 + offset_millihz;
         int32_t frac_mhz_s = total_mhz % 1000;
         int32_t extra_hz_s = total_mhz / 1000;
@@ -508,6 +801,7 @@ esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz) {
         uint32_t frac_mhz = (uint32_t)frac_mhz_s;
         _ad_last_hz = out_hz;
         _ad_last_frac = frac_mhz;
+        // Compute integer-Hz FTW then add the milli-Hz fractional increment
         uint32_t fw = ad9850_freq_word(out_hz);
 
         fw += (frac_mhz * AD9850_FTW_FRAC_PER_MHZ_NUM) / AD9850_FTW_FRAC_PER_MHZ_DEN;
@@ -519,17 +813,21 @@ esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz) {
 
 esp_err_t oscillator_enable(bool en) {
     if (_osc_type == OSC_SI5351) {
+        // Register 3 (Output Enable Control): bit 0 = CLK0 disable (active-low logic).
+        // 0xFE (1111 1110) enables CLK0; 0xFF disables all outputs.
         uint8_t val = en ? 0xFE : 0xFF;
         return si_write(3, val);
     }
     if (_osc_type == OSC_AD9850) {
         if (en) {
+            // Restore the last programmed frequency when coming out of power-down
             if (_ad_last_hz > 0u) {
                 uint32_t fw = ad9850_freq_word(_ad_last_hz);
                 fw += (_ad_last_frac * AD9850_FTW_FRAC_PER_MHZ_NUM) / AD9850_FTW_FRAC_PER_MHZ_DEN;
-                ad9850_write_word(fw, 0x00u);
+                ad9850_write_word(fw, 0x00u); // phase/control = 0: normal operation
             }
         } else {
+            // Power down: FTW = 0, control byte bit 2 = 1 (power-down enable)
             ad9850_write_word(0u, 0x04u);
         }
     }
@@ -537,14 +835,17 @@ esp_err_t oscillator_enable(bool en) {
 }
 
 void oscillator_tx_begin(void) {
+    // Mark start of TX burst; defers calibration changes until transmission ends
     _osc_tx_active = true;
 }
 
 void oscillator_tx_end(void) {
     _osc_tx_active = false;
+    // Apply any calibration update that arrived while the TX was in progress
     if (_cal_pending) {
         _cal_pending = false;
         _si_cal = _cal_pending_ppb;
+        // Invalidate the band cache so si_cache_band() runs again with new cal
         _si_cache.valid = false;
         _si_last_set_hz = 0u; // force full si_cache_band() on next oscillator_set_freq()
         ESP_LOGI(TAG, "SI5351 deferred cal applied: %ld ppb", (long)_cal_pending_ppb);
@@ -553,6 +854,7 @@ void oscillator_tx_end(void) {
 
 esp_err_t oscillator_set_cal(int32_t ppb) {
     if (_osc_type == OSC_SI5351) {
+        // Defer calibration if a TX is in progress to avoid mid-symbol frequency jumps
         if (_osc_tx_active) {
             _cal_pending = true;
             _cal_pending_ppb = ppb;
@@ -561,29 +863,36 @@ esp_err_t oscillator_set_cal(int32_t ppb) {
         }
 
         _si_cal = ppb;
-
+        // Invalidate cache so next oscillator_set_freq() recomputes with new cal
         _si_cache.valid = false;
         _si_last_set_hz = 0u;
         ESP_LOGI(TAG, "SI5351 cal set: %ld ppb", (long)ppb);
     } else if (_osc_type == OSC_AD9850) {
+        // For AD9850: adjust the pre-computed FTW constants proportionally.
+        // A positive ppb means the crystal runs fast, so we decrease the FTW
+        // constants to output a slightly lower frequency and compensate.
         _ad_cal = ppb;
 
         uint32_t ppb_abs = (ppb >= 0) ? (uint32_t)ppb : (uint32_t)(-(int32_t)ppb);
         uint32_t delta_per_mhz = (uint32_t)(((uint64_t)AD9850_FTW_PER_MHZ * (uint64_t)ppb_abs) / 1000000ULL);
         uint32_t delta_per_hz = (uint32_t)(((uint64_t)AD9850_FTW_INT_PER_HZ * (uint64_t)ppb_abs) / 1000000ULL);
         if (ppb > 0) {
+            // Crystal runs fast: reduce FTW to output a lower (corrected) frequency
             _ad_ftw_per_mhz_cal = AD9850_FTW_PER_MHZ - delta_per_mhz;
             _ad_ftw_int_per_hz_cal = AD9850_FTW_INT_PER_HZ - delta_per_hz;
         } else if (ppb < 0) {
+            // Crystal runs slow: increase FTW to output a higher (corrected) frequency
             _ad_ftw_per_mhz_cal = AD9850_FTW_PER_MHZ + delta_per_mhz;
             _ad_ftw_int_per_hz_cal = AD9850_FTW_INT_PER_HZ + delta_per_hz;
         } else {
+            // Zero correction: restore nominal FTW constants
             _ad_ftw_per_mhz_cal = AD9850_FTW_PER_MHZ;
             _ad_ftw_int_per_hz_cal = AD9850_FTW_INT_PER_HZ;
         }
         ESP_LOGI(TAG, "AD9850 cal set: %ld ppb -> FTW/MHz=%lu FTW/Hz=%lu", (long)ppb, (unsigned long)_ad_ftw_per_mhz_cal,
                  (unsigned long)_ad_ftw_int_per_hz_cal);
     } else {
+        // DUMMY mode: store the value so it can be retrieved later
         _si_cal = ppb;
         ESP_LOGI(TAG, "Dummy cal stored: %ld ppb", (long)ppb);
     }

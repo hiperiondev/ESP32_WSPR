@@ -22,15 +22,33 @@
 #include "time_sync.h"
 
 static const char *TAG = "time_sync";
+
+// Set to true on the first successful time update; never cleared
 static volatile bool _synced = false;
 
 // =============================================================================
 //  NTP (SNTP) implementation
 // =============================================================================
+//
+// WSPR requires the transmitter clock to be accurate within ±1 second of UTC.
+// The SNTP client polls the configured NTP server periodically and calls
+// settimeofday() when a valid response is received, updating the system wall
+// clock.  After the first sync the _synced flag is set and the WSPR scheduler
+// is allowed to begin transmission timing.
+//
+// Typical NTP accuracy over Wi-Fi: 1-50 ms — well within WSPR's ±1 s budget.
 #ifdef CONFIG_WSPR_TIME_NTP
 
 #include "esp_sntp.h"
 
+/**
+ * @brief SNTP synchronization callback — called by the SNTP client task.
+ *
+ * Invoked by esp_sntp on each successful time synchronization. Sets the
+ * _synced flag and logs the new UTC time.
+ *
+ * @param tv Pointer to the timeval set by the SNTP client.
+ */
 static void sntp_cb(struct timeval *tv) {
     _synced = true;
     char buf[32];
@@ -41,6 +59,7 @@ static void sntp_cb(struct timeval *tv) {
 }
 
 esp_err_t time_sync_init(const char *ntp_server) {
+    // Configure and start the ESP-IDF SNTP client in polling mode
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, ntp_server ? ntp_server : "pool.ntp.org");
     sntp_set_time_sync_notification_cb(sntp_cb);
@@ -50,6 +69,9 @@ esp_err_t time_sync_init(const char *ntp_server) {
 }
 
 void time_sync_restart_ntp(const char *ntp_server) {
+    // Stop the current SNTP session, reconfigure the server, and restart.
+    // The _synced flag is intentionally NOT cleared: a previously synced clock
+    // remains valid; the restart only changes the server for future polls.
     esp_sntp_stop();
     esp_sntp_setservername(0, ntp_server ? ntp_server : "pool.ntp.org");
     // Re-register callback -- esp_sntp_init() may clear it on some IDF versions.
@@ -61,29 +83,54 @@ void time_sync_restart_ntp(const char *ntp_server) {
 // =============================================================================
 //  GPS (NMEA UART) implementation
 // =============================================================================
+//
+// WSPR requires UTC time accuracy within ±1 second.  A UART-connected GPS
+// receiver provides UTC time via NMEA-0183 sentences at 1 Hz.  This driver
+// parses $GPRMC/$GNRMC (Recommended Minimum Specific GNSS Data) and
+// $GPZDA/$GNZDA (Time and Date) sentences.
+//
+// Optional PPS (Pulse Per Second) support improves sub-second accuracy from
+// ~10 ms (limited by UART latency) to a few microseconds by zeroing the
+// sub-second component of the system clock on each rising PPS edge.
+//
+// NMEA sentence checksum: XOR of all bytes between '$' and '*' (exclusive),
+// compared with the two-character hex value following '*'.
 #elif defined(CONFIG_WSPR_TIME_GPS)
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_timer.h"
 
+// UART port and buffer size for GPS NMEA data reception
 #define GPS_UART_PORT_NUM ((uart_port_t)CONFIG_GPS_UART_PORT)
 #define GPS_BUF_SIZE      512
 
 static TaskHandle_t _gps_task = NULL;
 
+// PPS support is compiled in only when a valid GPIO is configured
 #if defined(CONFIG_GPS_PPS_GPIO) && (CONFIG_GPS_PPS_GPIO >= 0)
 #define GPS_PPS_ENABLED 1
 
+// Timestamp of the last PPS rising edge in microseconds (esp_timer_get_time())
 static volatile int64_t _pps_us = 0;
 #else
 #define GPS_PPS_ENABLED 0
 #endif
 
 #if GPS_PPS_ENABLED
+/**
+ * @brief PPS rising-edge ISR — runs from IRAM for minimum latency.
+ *
+ * Captures the current esp_timer timestamp and zeroes the sub-second field of
+ * the system wall clock.  The NMEA parser sets the integer second correctly;
+ * this ISR only improves the sub-second accuracy from ~10 ms to a few µs.
+ *
+ * @param arg Unused ISR argument.
+ */
 static void IRAM_ATTR pps_isr(void *arg) {
     _pps_us = esp_timer_get_time();
 
+    // Zero the microsecond field to align the wall clock to the PPS pulse edge
     struct timeval tv;
     gettimeofday(&tv, NULL);
     tv.tv_usec = 0;
@@ -91,6 +138,16 @@ static void IRAM_ATTR pps_isr(void *arg) {
 }
 #endif
 
+/**
+ * @brief Validate the XOR checksum of an NMEA-0183 sentence.
+ *
+ * NMEA checksum is defined as the XOR of all characters between '$' and '*'
+ * (the delimiters themselves are excluded).  The checksum is expressed as a
+ * two-character uppercase hex value after the '*'.
+ *
+ * @param sentence  NUL-terminated NMEA sentence string starting with '$'.
+ * @return true if the computed checksum matches the transmitted checksum.
+ */
 static bool validate_nmea_checksum(const char *sentence) {
     const char *p = sentence;
     if (*p != '$')
@@ -113,6 +170,22 @@ static bool validate_nmea_checksum(const char *sentence) {
     return calc == expected;
 }
 
+/**
+ * @brief Parse an NMEA $GPRMC or $GNRMC sentence and extract the UTC time.
+ *
+ * RMC (Recommended Minimum Specific GNSS Data) sentence format:
+ *   $GPRMC,HHMMSS.ss,A,LLLL.LL,a,YYYYY.YY,a,x.x,x.x,DDMMYY,...*hh
+ * Field 1: UTC time HHMMSS[.ss]
+ * Field 2: Status A=valid, V=void (no fix)
+ * Field 9: Date DDMMYY
+ *
+ * Sanity check rejects years outside [2020, 2035] to guard against GPS
+ * rollover or unprogrammed receiver dates.
+ *
+ * @param sentence  NUL-terminated NMEA RMC sentence.
+ * @param tv        Output timeval set from the parsed UTC date and time.
+ * @return true if the sentence is valid, has an active fix, and parsed cleanly.
+ */
 static bool parse_rmc(const char *sentence, struct timeval *tv) {
     if (!validate_nmea_checksum(sentence))
         return false;
@@ -139,7 +212,7 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     // Field 2: status A=valid V=void
     tok = strtok_r(NULL, ",", &save);
     if (!tok || tok[0] != 'A')
-        return false;
+        return false; // no valid fix; reject the sentence
 
     // Fields 3-8: lat, N/S, lon, E/W, speed, course -- skip with NULL guard
     for (int i = 0; i < 6; i++) {
@@ -156,6 +229,7 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     int mo = (tok[2] - '0') * 10 + (tok[3] - '0');
     int yy = (tok[4] - '0') * 10 + (tok[5] - '0') + 2000;
 
+    // Reject clearly invalid or rollover years
     if (yy < 2020 || yy > 2035)
         return false;
 
@@ -164,7 +238,7 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     t.tm_min = mm;
     t.tm_sec = ss;
     t.tm_mday = dd;
-    t.tm_mon = mo - 1;
+    t.tm_mon = mo - 1; // tm_mon is 0-based
     t.tm_year = yy - 1900;
 
     time_t ts = mktime(&t);
@@ -177,6 +251,23 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     return true;
 }
 
+/**
+ * @brief Parse an NMEA $GPZDA or $GNZDA sentence and extract the UTC time.
+ *
+ * ZDA (Time and Date) sentence format:
+ *   $GPZDA,HHMMSS.ss,DD,MM,YYYY,xx,yy*hh
+ * Field 1: UTC time HHMMSS[.ss]
+ * Field 2: Day (01-31)
+ * Field 3: Month (01-12)
+ * Field 4: Year (4 digits)
+ *
+ * ZDA provides a 4-digit year, avoiding the 2-digit year ambiguity of RMC.
+ * Sanity bounds check prevents accepting obviously bad timestamps.
+ *
+ * @param sentence  NUL-terminated NMEA ZDA sentence.
+ * @param tv        Output timeval set from the parsed UTC date and time.
+ * @return true if the sentence parsed cleanly and values are in valid ranges.
+ */
 static bool parse_zda(const char *sentence, struct timeval *tv) {
     if (!validate_nmea_checksum(sentence))
         return false;
@@ -241,6 +332,16 @@ static bool parse_zda(const char *sentence, struct timeval *tv) {
     return true;
 }
 
+/**
+ * @brief Dispatch an NMEA sentence to the appropriate parser.
+ *
+ * Checks the sentence identifier prefix and routes to parse_zda() (preferred,
+ * has 4-digit year) or parse_rmc().  All other sentence types are ignored.
+ *
+ * @param sentence  NUL-terminated NMEA sentence.
+ * @param tv        Output timeval filled on successful parse.
+ * @return true if the sentence was recognized and parsed successfully.
+ */
 static bool parse_rmc_or_zda(const char *sentence, struct timeval *tv) {
     if (strncmp(sentence, "$GPZDA", 6) == 0 || strncmp(sentence, "$GNZDA", 6) == 0)
         return parse_zda(sentence, tv);
@@ -250,6 +351,18 @@ static bool parse_rmc_or_zda(const char *sentence, struct timeval *tv) {
     return false;
 }
 
+/**
+ * @brief FreeRTOS task: read NMEA sentences from UART and update the system clock.
+ *
+ * Continuously reads bytes from the GPS UART, assembles complete NMEA sentences
+ * terminated by LF, and calls parse_rmc_or_zda().  When a valid sentence is
+ * received the system wall clock is updated via settimeofday() and _synced is set.
+ *
+ * At 9600 baud a full RMC sentence (~70 bytes) takes ~73 ms, so a 1-second
+ * uart_read_bytes timeout is sufficient to detect UART failure without busy-polling.
+ *
+ * @param arg Unused task argument.
+ */
 static void gps_task(void *arg) {
     uint8_t buf[GPS_BUF_SIZE];
     char line[GPS_BUF_SIZE];
@@ -261,6 +374,7 @@ static void gps_task(void *arg) {
         for (int i = 0; i < len; i++) {
             char c = (char)buf[i];
             if (c == '\n') {
+                // End of sentence: attempt to parse it
                 line[line_pos] = '\0';
                 struct timeval tv;
 
@@ -280,11 +394,13 @@ static void gps_task(void *arg) {
 }
 
 esp_err_t time_sync_init(const char *ntp_server) {
-    (void)ntp_server;
+    (void)ntp_server; // ignored in GPS mode
 
+    // Force UTC timezone so NMEA UTC timestamps are not affected by locale or DST
     setenv("TZ", "UTC0", 1);
     tzset();
 
+    // Configure and install the UART driver for the GPS receiver
     uart_config_t uart_cfg = {
         .baud_rate = CONFIG_GPS_BAUD_RATE,
         .data_bits = UART_DATA_8_BITS,
@@ -296,10 +412,12 @@ esp_err_t time_sync_init(const char *ntp_server) {
     uart_param_config(GPS_UART_PORT_NUM, &uart_cfg);
     uart_set_pin(GPS_UART_PORT_NUM, CONFIG_GPS_TX_GPIO, CONFIG_GPS_RX_GPIO, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
+    // Create the NMEA parsing task (6 KB stack; NMEA lines are < 100 bytes)
     xTaskCreate(gps_task, "gps", 6144, NULL, 5, &_gps_task);
     ESP_LOGI(TAG, "GPS UART started on UART%d RX=%d (TZ forced to UTC)", CONFIG_GPS_UART_PORT, CONFIG_GPS_RX_GPIO);
 
 #if GPS_PPS_ENABLED
+    // Configure the PPS GPIO as an input with a rising-edge interrupt
     gpio_config_t pps_cfg = {
         .pin_bit_mask = BIT64(CONFIG_GPS_PPS_GPIO),
         .mode = GPIO_MODE_INPUT,
@@ -309,6 +427,7 @@ esp_err_t time_sync_init(const char *ntp_server) {
     };
     esp_err_t pps_err = gpio_config(&pps_cfg);
     if (pps_err == ESP_OK) {
+        // Install the GPIO ISR service (shared for all GPIO interrupts)
         esp_err_t svc_err = gpio_install_isr_service(0);
         if (svc_err != ESP_OK && svc_err != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "GPS PPS: gpio_install_isr_service failed (%s) -- PPS disabled", esp_err_to_name(svc_err));
@@ -341,6 +460,7 @@ bool time_sync_is_ready(void) {
 }
 
 bool time_sync_wait(uint32_t timeout_ms) {
+    // Poll _synced every 500 ms; block indefinitely when timeout_ms is 0
     uint32_t elapsed = 0;
     while (!_synced) {
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -360,15 +480,29 @@ bool time_sync_get(struct timeval *tv) {
     return true;
 }
 
+// WSPR transmissions must start within ±1 second of the even UTC minute boundary.
+// The specification says transmissions "nominally start one second into an even
+// UTC minute" (e.g. 00:00:01, 00:02:01, ...).  This function computes how many
+// seconds remain until the next such boundary so the scheduler can sleep
+// efficiently and then fine-align to within a few milliseconds.
+//
+// The 2-minute cycle period comes from the WSPR frame duration:
+//   162 symbols * 8192/12000 s/symbol ≈ 110.6 s
+// rounded up to 120 s (2 minutes) for the standard 2-minute slot grid.
 int32_t time_sync_secs_to_next_tx(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     time_t now = tv.tv_sec;
 
+    // Position within the current 2-minute (120-second) slot window
     uint32_t p = (uint32_t)(now % 120u);
+
+    // Return 0 if we are at or within the first 3 seconds of the window:
+    // this gives the scheduler a generous window to catch the boundary
+    // without missing the transmission slot.
     if (p <= 3u) {
         return 0;
     } else {
-        return (int32_t)(120u - p);
+        return (int32_t)(120u - p); // seconds until the next even-minute boundary
     }
 }
