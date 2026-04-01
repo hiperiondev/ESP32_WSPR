@@ -1,7 +1,7 @@
 /**
  * @file webui_strings.h
  * @author Emiliano Augusto Gonzalez
- * @copyright Copyright (c) 2026 Emiliano Augusto Gonzalez
+ * @copyright Copyright (c) 2026 Emiliano Augusto Gonzalez (lu3vea@gmail.com)
  * @brief ESP32 WSPR project
  * @see https://github.com/hiperiondev/ESP32_WSPR
  *

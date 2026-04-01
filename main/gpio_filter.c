@@ -1,8 +1,8 @@
 /**
  * @file gpio_filter.c
  * @author Emiliano Augusto Gonzalez
- * @copyright Copyright (c) 2026 Emiliano Augusto Gonzalez
- * @brief ESP32 WSPR project
+ * @copyright Copyright (c) 2026 Emiliano Augusto Gonzalez  (lu3vea@gmail.com)
+ * @brief 3-bit GPIO low-pass filter bank driver.
  * @see https://github.com/hiperiondev/ESP32_WSPR
  *
  * @license GNU General Public License v3.0

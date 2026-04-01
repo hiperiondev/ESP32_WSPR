@@ -1,7 +1,7 @@
 /**
  * @file version.h
  * @brief Firmware version constants and version-string helper macros.
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @copyright 2026 Emiliano Augusto Gonzalez  (lu3vea@gmail.com)
  * @see https://github.com/hiperiondev/ESP32_WSPR
  * @license GNU General Public License v3.0
  *

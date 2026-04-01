@@ -1,7 +1,7 @@
 /**
  * @file gpio_filter.h
  * @brief 3-bit GPIO low-pass filter bank driver.
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @copyright 2026 Emiliano Augusto Gonzalez  (lu3vea@gmail.com)
  * @see https://github.com/hiperiondev/ESP32_WSPR
  * @license GNU General Public License v3.0
  *

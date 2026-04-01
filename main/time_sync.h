@@ -1,7 +1,7 @@
 /**
  * @file time_sync.h
  * @brief UTC time synchronisation subsystem — NTP or GPS, selected at build time.
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @copyright 2026 Emiliano Augusto Gonzalez  (lu3vea@gmail.com)
  * @see https://github.com/hiperiondev/ESP32_WSPR
  * @license GNU General Public License v3.0
  *

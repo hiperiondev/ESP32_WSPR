@@ -1,6 +1,10 @@
 /**
  * @file oscillator.h
+ * @author Emiliano Augusto Gonzalez
+ * @copyright Copyright (c) 2026 Emiliano Augusto Gonzalez  (lu3vea@gmail.com)
  * @brief Runtime-detected RF oscillator driver — Si5351A or AD9850.
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This module provides a unified, hardware-agnostic interface to the RF signal
@@ -67,11 +71,6 @@
  * so it cannot be preempted by the second Xtensa core or by a task switch
  * mid-transfer.  The Si5351A uses the ESP-IDF I2C master driver which is
  * internally mutex-protected.
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @see https://github.com/hiperiondev/ESP32_WSPR
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #pragma once
