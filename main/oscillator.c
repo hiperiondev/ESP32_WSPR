@@ -267,8 +267,13 @@ static esp_err_t si_write_pll_p1p2_only(uint32_t pll_a, uint32_t pll_b, uint32_t
  * The R-divider extends the frequency range down to 8 kHz by dividing the
  * MS0 output by 2^r_div_reg (1, 2, 4, 8, 16, 32, 64, or 128).
  *
- * AN619 P1 for integer-only MS0: P1 = 128*d_int - 512  (b=0 → floor(128*0/1)=0)
- * Register 44 also holds the MS0_INT flag (bit 6) and r_div_reg (bits [6:4]).
+ * AN619 P1 for integer-only MS0: P1 = 128*d_int - 512  (b=0, floor(128*0/1)=0)
+ * Register 44 layout (AN619 Table 9):
+ *   Bit 7:   Reserved (0)
+ *   Bit 6:   MS0_INT (1 = integer mode)
+ *   Bits 5:3 R0_DIV[2:0] (R-divider exponent, divide by 2^r_div_reg)
+ *   Bit 2:   Reserved (0)
+ *   Bits 1:0 MS0_P1[17:16]
  *
  * @param d_int     Even integer output divider (8-2048 even, or 4/6/8).
  * @param r_div_reg R-divider exponent 0-7 (output division = 2^r_div_reg).
@@ -279,8 +284,8 @@ static esp_err_t si_write_ms0_integer(uint32_t d_int, uint8_t r_div_reg) {
     uint8_t regs[8] = {
         0x00,
         0x01,
-        // Reg 44: MS0_INT (bit 6) | R0_DIV (bits [6:4]) | P1[17:16] (bits [1:0])
-        (uint8_t)(0x40u | ((r_div_reg & 0x07u) << 4) | ((p1 >> 16) & 0x03u)),
+        // Reg 44: bit6=MS0_INT | bits[5:3]=R0_DIV[2:0] | bits[1:0]=P1[17:16]
+        (uint8_t)(0x40u | ((r_div_reg & 0x07u) << 3) | ((p1 >> 16) & 0x03u)),
         (uint8_t)((p1 >> 8) & 0xFF),
         (uint8_t)(p1 & 0xFF),
         0x00,
