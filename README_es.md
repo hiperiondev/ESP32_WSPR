@@ -49,15 +49,15 @@
 
 ## Acerca del proyecto
 
-**Transmisor WSPR** es un firmware completo y autónomo de beacon WSPR (Weak Signal Propagation Reporter) construido sobre el framework **ESP-IDF** de Espressif para la familia de microcontroladores ESP32. A diferencia de la mayoría de los proyectos WSPR para aficionados que dependen del ecosistema Arduino, este firmware está escrito en C puro sobre las APIs nativas de ESP-IDF, dándole acceso a la gestión de tareas FreeRTOS, el cliente SNTP nativo, la pila `esp_wifi`, almacenamiento persistente `nvs_flash` y el servidor web `esp_http_server` — todo sin la sobrecarga de la capa de abstracción Arduino.
+**WSPR Transmitter** es un firmware completo y autónomo de beacon WSPR (Weak Signal Propagation Reporter) construido sobre el framework **ESP-IDF** de Espressif para la familia de microcontroladores ESP32. A diferencia de la mayoría de los proyectos WSPR para aficionados que dependen del ecosistema Arduino, este firmware está escrito en C puro sobre las APIs nativas de ESP-IDF, dándole acceso a la gestión de tareas FreeRTOS, el cliente SNTP nativo, la pila `esp_wifi`, almacenamiento persistente `nvs_flash` y el servidor web `esp_http_server` — todo sin la sobrecarga de la capa de abstracción Arduino.
 
-El proyecto está diseñado para ser apto para operación desatendida como beacon: codifica mensajes WSPR Tipo 1, 2 y 3 completamente en el chip, controla un oscilador RF (Si5351A o AD9850) con resolución sub-Hz por símbolo, selecciona automáticamente el filtro de paso bajo correcto mediante un bus GPIO de 3 bits, sincroniza la hora vía NTP o GPS (con PPS opcional), y expone una aplicación web de página única responsiva para configuración y monitoreo. Todos los ajustes del usuario se persisten en la partición flash NVS (almacenamiento no volátil) del ESP32 y sobreviven a cortes de energía.
+El proyecto está diseñado para ser apto para operación desatendida como beacon: codifica mensajes WSPR Tipo 1, 2 y 3 completamente en el chip, controla un oscilador RF (Si5351A o AD9850) con resolución sub-Hz por símbolo, selecciona automáticamente el filtro de paso bajo correcto mediante un bus GPIO de 3 bits, sincroniza la hora vía NTP o GPS (con PPS opcional), y expone una aplicación web de página única responsiva para configuración y monitoreo. Todos los ajustes del usuario persisten en la partición flash NVS (almacenamiento no volátil) del ESP32 y sobreviven a cortes de energía.
 
 El modo WSPR ocupa aproximadamente 6 Hz de ancho de banda RF y puede decodificarse con relaciones señal/ruido tan bajas como −28 dB en un ancho de banda de referencia de 2,5 kHz, lo que lo hace extremadamente útil para estudios de propagación usando niveles de potencia muy bajos. Una vez transmitidos, los reportes de recepción de estaciones WSPR automatizadas en todo el mundo se cargan automáticamente a [WSPRnet](https://www.wsprnet.org), donde una interfaz de mapas permite ver exactamente hasta dónde llegó la señal.
 
 ### Decisiones clave de diseño
 
-- **Solo ESP-IDF** — sin Arduino, sin bibliotecas I2C de terceros. Todos los drivers de oscilador están escritos desde cero sobre las APIs `driver/i2c_master.h` y `driver/gpio.h` de IDF.
+- **Solo ESP-IDF** — sin Arduino, sin bibliotecas I2C de terceros. Todos los drivers del oscilador están escritos desde cero sobre las APIs `driver/i2c_master.h` y `driver/gpio.h` de IDF.
 - **Soporte de oscilador dual** — el firmware autodetecta un Si5351A al arrancar mediante sondeo ACK por I2C, luego cae al AD9850 (SPI serial bit-bang de solo escritura), y finalmente a un modo ficticio silencioso si ninguno está presente — así el sistema nunca falla ante hardware faltante.
 - **Aritmética solo entera** — el codificador WSPR completo, el cálculo de divisores PLL del Si5351 y el cómputo de la palabra de sintonización del AD9850 usan únicamente matemáticas enteras de 32 bits. Sin punto flotante, sin `double`, lo que hace el código eficiente en el núcleo Xtensa LX6 sin necesitar la biblioteca soft-float.
 - **SPA en un solo archivo embebido** — la interfaz web se compila en el firmware como un archivo de cabecera C; no se necesita componente de sistema de archivos ni partición SPIFFS/LittleFS.
@@ -74,7 +74,7 @@ El modo WSPR ocupa aproximadamente 6 Hz de ancho de banda RF y puede decodificar
 
 ## Descripción del protocolo WSPR
 
-WSPR (**W**eak **S**ignal **P**ropagation **R**eporter, pronunciado *"susurro"* en inglés) es un protocolo de radio digital para radioaficionados diseñado por Joe Taylor (K1JT), Premio Nobel de Física, y lanzado originalmente en 2008. Forma parte del conjunto WSJT-X y se ha convertido en uno de los modos de beacon de propagación más ampliamente utilizados en la radioafición.
+WSPR (**W**eak **S**ignal **P**ropagation **R**eporter, pronunciado *"susurro"* en inglés) es un protocolo de radio digital para radioaficionados diseñado por Joe Taylor (K1JT), Premio Nobel de Física, y lanzado originalmente en 2008. Forma parte del conjunto WSJT-X y se ha convertido en uno de los modos de baliza de propagación más ampliamente utilizados en la radioafición.
 
 ### Qué transmite WSPR
 
@@ -163,7 +163,7 @@ El estándar de la comunidad WSPR recomienda transmitir en no más del 20% de lo
 - ✅ **Codificador WSPR Tipo 1, 2 y 3 completo** — empaquetado de indicativo, codificación convolucional (K=32, tasa 1/2), intercalado por inversión de bits, superposición del vector de sincronía; aritmética solo entera
 - ✅ **Soporte de oscilador dual** — Si5351A (I2C, autodetectado) y AD9850 (bit-bang GPIO, asumido presente); modo ficticio elegante si ninguno es encontrado
 - ✅ **12 bandas WSPR** — de 2200 m a 10 m (137 kHz a 28 MHz)
-- ✅ **Selección de región UAIRO** — Región 1, 2 o 3 para la frecuencia de marcación correcta en 60 m
+- ✅ **Selección de región UAIRO/IARU** — Región 1, 2 o 3 para la frecuencia de marcación correcta en 60 m
 - ✅ **Selección automática de filtro de paso bajo** — bus GPIO BCD de 3 bits, 8 posiciones de filtro, retardo de establecimiento de relé configurable
 - ✅ **Sincronía de tiempo vía NTP** (SNTP, servidor seleccionable) o **GPS** (NMEA-0183 $GPRMC/$GNRMC/$GPZDA/$GNZDA por UART, con PPS opcional)
 - ✅ **Modo STA Wi-Fi** con fallback a AP suave (192.168.4.1) y temporizador de reconexión en segundo plano
@@ -202,7 +202,7 @@ El estándar de la comunidad WSPR recomienda transmitir en no más del 20% de lo
 |---|---|
 | **Banco de filtros de paso bajo** | Supresión de armónicos (legalmente requerido en la mayoría de jurisdicciones) |
 | **Decodificador BCD / driver de relé** | Controlado por 3 líneas GPIO (GPIO_A, GPIO_B, GPIO_C) |
-| **Módulo GPS** (NMEA UART) | Para sincronía de tiempo por GPS (alternativa a NTP), especialmente para uso portátil/remoto |
+| **Módulo GPS** (NMEA UART) | Para sincronía de tiempo por GPS (alternativa a NTP), especialmente en uso portátil/remoto |
 | **Amplificador de potencia** | Aumentar la salida más allá de los ~10 dBm del oscilador |
 | **Fuente de alimentación 3,3 V** | Suministro estable para el ESP32 y el Si5351 |
 
@@ -434,7 +434,7 @@ La tarjeta **Bandas activas** presenta una casilla de verificación para cada un
 | 630 m | 475,700 kHz |
 | 160 m | 1.838,100 kHz |
 | 80 m | 3.570,100 kHz |
-| 60 m | Dependiente de la región (ver tarjeta Región UAIRO) |
+| 60 m | Dependiente de la región (ver tarjeta Región UAIRO/IARU) |
 | 40 m | 7.040,100 kHz |
 | 30 m | 10.140,200 kHz |
 | 20 m | 14.097,100 kHz |
@@ -447,11 +447,11 @@ Se pueden habilitar múltiples bandas simultáneamente. Cuando el salto de frecu
 
 ---
 
-#### Tarjeta de Región UAIRO
+#### Tarjeta de Región UAIRO/IARU
 
 ![WebUI UAIRO](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/webui_iaru.jpg)
 
-La tarjeta **Región UAIRO y frecuencia en 60 m** selecciona la región administrativa ITU/UAIRO. Esto afecta únicamente la frecuencia de marcación en la banda de 60 m, que difiere entre regiones debido a las asignaciones nacionales de espectro:
+La tarjeta **Región UAIRO/IARU y frecuencia en 60 m** selecciona la región administrativa ITU/UAIRO/IARU. Esto afecta únicamente la frecuencia de marcación en la banda de 60 m, que difiere entre regiones debido a las asignaciones nacionales de espectro:
 
 | Región | Cobertura | Frecuencia de marcación WSPR en 60 m |
 |---|---|---|
@@ -877,7 +877,7 @@ Precisión típica: ±1 s (limitada por la tasa de sentencias NMEA de 1 Hz y la 
 
 Cuando `CONFIG_GPS_PPS_GPIO` se establece a un número GPIO válido (≥ 0), una ISR de flanco ascendente (`pps_isr`) se activa en cada pulso PPS y pone a cero el componente sub-segundo del reloj del sistema. Esto reduce la incertidumbre de tiempo de ~10 ms (latencia UART) a unos pocos microsegundos. La sentencia NMEA sigue proporcionando el valor correcto del segundo UTC; PPS solo mejora la precisión sub-segundo. Establece `CONFIG_GPS_PPS_GPIO = -1` (el predeterminado) para deshabilitar PPS.
 
-El modo GPS es completamente independiente de Wi-Fi, lo que lo hace adecuado para instalaciones de beacon portátiles o remotas sin acceso a internet.
+El modo GPS es completamente independiente de Wi-Fi, lo que lo hace adecuado para instalaciones de balizas portátiles o remotas sin acceso a internet.
 
 <div align="right">
   <a href="#readme-top">
@@ -920,7 +920,7 @@ El endpoint `GET /api/wifi_scan` lanza un escaneo bloqueante (~2 s) que devuelve
 
 ---
 
-## Frecuencias de banda WSPR y regiones UAIRO
+## Frecuencias de banda WSPR y regiones UAIRO/IARU
 
 El firmware almacena las frecuencias de marcación para las 12 bandas y las 3 regiones UAIRO en la tabla `BAND_FREQ_HZ[3][BAND_COUNT]` en `config.c`. La función en línea `config_band_freq_hz(region, banda)` selecciona la entrada correcta con acceso a array verificado por límites.
 
@@ -945,9 +945,9 @@ Todas las frecuencias son **frecuencias de marcación** en Hz. La frecuencia RF 
 
 **Nota sobre los 60 m:** La frecuencia WSPR en 60 m difiere entre regiones UAIRO debido a los diferentes planes nacionales de canalización. La Región 1 (Europa) usa 5.288,6 kHz. La Región 2 (Américas) usa 5.346,5 kHz según la coordinación FCC/ARRL. La Región 3 usa 5.367,0 kHz según la coordinación WIA/JARL. Siempre verifica que la operación en 60 m esté permitida bajo tu licencia nacional de radioafición.
 
-### Selección de tu región UAIRO
+### Selección de tu región UAIRO/IARU
 
-Establece la región en la tarjeta **Región UAIRO** de la WebUI. La selección se guarda en NVS. El campo `iaru_region` en `wspr_config_t` almacena valores 1, 2 o 3; cualquier valor almacenado inválido es automáticamente corregido a 1 al arrancar por `config_load()`.
+Establece la región en la tarjeta **Región IARU** de la WebUI. La selección se guarda en NVS. El campo `iaru_region` en `wspr_config_t` almacena valores 1, 2 o 3; cualquier valor almacenado inválido es automáticamente corregido a 1 al arrancar por `config_load()`.
 
 <div align="right">
   <a href="#readme-top">
