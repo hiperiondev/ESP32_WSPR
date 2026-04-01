@@ -496,25 +496,20 @@ bool time_sync_get(struct timeval *tv) {
 int32_t time_sync_secs_to_next_tx(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    time_t now = tv.tv_sec;
+    // Calculation updated to target Second 1 (Hardware Setup)
+    uint32_t p = (uint32_t)(tv.tv_sec % 120u);
 
-    // Position within the current 2-minute (120-second) slot window
-    uint32_t p = (uint32_t)(now % 120u);
-
-    // Open window: phase 2, 3, or 4.
-    // Target is phase=2 (second :02 of even minute per WSPR spec).
-    // Allow up to phase=4 so the scheduler can detect a late start and skip.
-    if (p >= 2u && p <= 4u) {
+    // Returns 0 if we are in the hardware preparation window (Second 1)
+    // or the late-start detection window (Seconds 2-4).
+    if (p == 1u || (p >= 2u && p <= 4u)) {
         return 0;
     }
 
-    // p<2: distance to phase=2 of this current window.
-    // p==0 -> return 2, p==1 -> return 1.
-    if (p < 2u) {
-        return (int32_t)(2u - p);
+    // If we are at Second 0, we are 1 second away from the prep window.
+    if (p == 0u) {
+        return 1;
     }
 
-    // p>4: seconds remaining until phase=2 of the NEXT 120-second window.
-    // = (120 - p) + 2 = 122 - p
-    return (int32_t)(122u - p);
+    // Calculate distance to the next even-minute Second 1.
+    return (int32_t)(121u - p);
 }

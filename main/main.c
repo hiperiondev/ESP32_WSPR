@@ -250,7 +250,7 @@ static void wspr_transmit(void) {
         // Oscillator and LPF were already programmed during the pre-arm phase (phase==0)
         base_hz = g_pre_arm_base_hz;
     } else {
-        base_hz = config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx) + 1500u;
+        base_hz = config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx);
         oscillator_set_freq(base_hz);
         gpio_filter_select(BAND_FILTER[g_band_idx]);
         // Wait for LPF relay contacts to settle before enabling RF output
@@ -477,7 +477,7 @@ static void scheduler_task(void *arg) {
 
         // Compute seconds until the next even-minute WSPR TX window
         int32_t wait_sec = time_sync_secs_to_next_tx();
-        if (wait_sec > 0) {
+        if (wait_sec >= 0) {
             ESP_LOGI(TAG, "Next TX in %d s (band=%s)", wait_sec, BAND_NAME[g_band_idx]);
             // Sleep most of the wait period in 1-second chunks so the WDT stays fed
             if (wait_sec > 3) {
@@ -502,34 +502,34 @@ static void scheduler_task(void *arg) {
                 bool pre_armed_local = false;
 
                 for (;;) {
-                    struct timeval tv;
-                    gettimeofday(&tv, NULL);
-                    // phase = seconds elapsed since the start of the current 2-minute window
-                    uint32_t phase = (uint32_t)(tv.tv_sec % 120u);
+                    struct timeval tv_align;
+                    gettimeofday(&tv_align, NULL);
+                    uint32_t phase = (uint32_t)(tv_align.tv_sec % 120u);
 
-                    // At phase=0: configure oscillator frequency and LPF relay one second early
-                    if (phase == 0u && !pre_armed_local) {
-                        g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx) + 1500u;
-                        oscillator_set_freq(g_pre_arm_base_hz);
-                        gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
-                        g_pre_armed = true;
-                        pre_armed_local = true;
-                        ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
-                    }
-
-                    // At phase=1-3: the TX window is open; enter only at phase=1
-                    if (phase >= 1u && phase <= 3u) {
-                        if (phase > 1u) {
-                            // Missed the first second of the window: skip this slot
-                            ESP_LOGW(TAG, "Missed TX window (phase=%lu), skipping slot", (unsigned long)phase);
-                            g_pre_armed = false;
-                            g_pre_arm_base_hz = 0;
-                            do_skip = true;
+                    if (phase == 0u) {
+                        // Pre-arm at phase 0
+                        if (!pre_armed_local) {
+                            g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx) - 2u;
+                            oscillator_set_freq(g_pre_arm_base_hz);
+                            gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
+                            g_pre_armed = true;
+                            pre_armed_local = true;
+                            ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
                         }
+                    } else if (phase == 1u) {
+                        // Hit exactly +1.0 second boundary. Begin transmission immediately.
+                        break;
+                    } else if (phase >= 2u && phase <= 4u) {
+                        // We woke up late; miss this TX slot to avoid overlapping the next window.
+                        ESP_LOGW(TAG, "Missed TX window (phase=%lu), skipping slot", (unsigned long)phase);
+                        g_pre_armed = false;
+                        g_pre_arm_base_hz = 0;
+                        do_skip = true;
                         break;
                     }
 
-                    vTaskDelay(pdMS_TO_TICKS(10));
+                    // 1 ms tick delay for tight, predictable alignment without watchdog trips
+                    vTaskDelay(pdMS_TO_TICKS(1));
 
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                     esp_task_wdt_reset();
