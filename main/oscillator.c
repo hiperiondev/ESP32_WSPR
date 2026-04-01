@@ -327,17 +327,20 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     // to compensate and produce the correct output frequency.
     uint32_t vco_cal = _si_vco;
     if (_si_cal != 0) {
-        uint32_t vco_khz = _si_vco / 1000u;
+        // corr_Hz = VCO_Hz * ppb / 1,000,000,000
+        // Decompose VCO into MHz and kHz-remainder parts to stay in 32-bit:
+        //   VCO_Hz * ppb / 1e9
+        //   = (vco_mhz * 1e6 + vco_khz_rem * 1e3) * ppb / 1e9
+        //   = vco_mhz * ppb / 1e3  +  vco_khz_rem * ppb / 1e6
+        // Range check: 900 MHz * 100000 ppb / 1000 = 90,000,000 — fits uint32_t.
         int32_t ppb_s = _si_cal;
-        int32_t corr;
-        if (ppb_s >= 0) {
-            uint32_t p = (uint32_t)ppb_s;
-            corr = (int32_t)((vco_khz * (p / 1000u)) + (vco_khz * (p % 1000u) / 1000u));
-        } else {
-            uint32_t p = (uint32_t)(-ppb_s);
-            corr = -(int32_t)((vco_khz * (p / 1000u)) + (vco_khz * (p % 1000u) / 1000u));
-        }
-        vco_cal = (uint32_t)((int32_t)_si_vco + corr);
+        uint32_t ppb_abs = (ppb_s >= 0) ? (uint32_t)ppb_s : (uint32_t)(-ppb_s);
+        uint32_t vco_mhz = _si_vco / 1000000u;
+        uint32_t vco_khz_rem = (_si_vco % 1000000u) / 1000u;
+        int32_t corr = (int32_t)(vco_mhz * ppb_abs / 1000u) + (int32_t)(vco_khz_rem * ppb_abs / 1000000u);
+        if (ppb_s < 0)
+            corr = -corr;
+        vco_cal = (uint32_t)((int32_t)_si_vco - corr);
     }
 
     // R-divider: scale up frequencies below 500 kHz by powers of 2 until they
@@ -878,9 +881,24 @@ esp_err_t oscillator_set_cal(int32_t ppb) {
         // constants to output a slightly lower frequency and compensate.
         _ad_cal = ppb;
 
+        // delta = FTW_constant * ppb / 1,000,000,000
+        // Split into two 32-bit-safe multiplications to avoid 64-bit arithmetic:
+        //   FTW * ppb / 1e9 = (FTW / 1000) * (ppb / 1000)
+        //                   + (FTW / 1000) * (ppb % 1000) / 1000
+        //                   + (FTW % 1000) * (ppb / 1000) / 1000
+        // For AD9850_FTW_PER_MHZ ≈ 34,359,738 and ppb <= 100,000:
+        //   largest intermediate: (34359738/1000) * (100000/1000) = 34359 * 100 = 3,435,900 — fits uint32_t.
         uint32_t ppb_abs = (ppb >= 0) ? (uint32_t)ppb : (uint32_t)(-(int32_t)ppb);
-        uint32_t delta_per_mhz = (uint32_t)(((uint64_t)AD9850_FTW_PER_MHZ * (uint64_t)ppb_abs) / 1000000ULL);
-        uint32_t delta_per_hz = (uint32_t)(((uint64_t)AD9850_FTW_INT_PER_HZ * (uint64_t)ppb_abs) / 1000000ULL);
+        uint32_t ftw_mhz_q = AD9850_FTW_PER_MHZ / 1000u;
+        uint32_t ftw_mhz_r = AD9850_FTW_PER_MHZ % 1000u;
+        uint32_t ppb_q = ppb_abs / 1000u;
+        uint32_t ppb_r = ppb_abs % 1000u;
+        uint32_t delta_per_mhz = ftw_mhz_q * ppb_q + (ftw_mhz_q * ppb_r) / 1000u + (ftw_mhz_r * ppb_q) / 1000u;
+
+        uint32_t ftw_hz_q = AD9850_FTW_INT_PER_HZ / 1000u;
+        uint32_t ftw_hz_r = AD9850_FTW_INT_PER_HZ % 1000u;
+        uint32_t delta_per_hz = ftw_hz_q * ppb_q + (ftw_hz_q * ppb_r) / 1000u + (ftw_hz_r * ppb_q) / 1000u;
+		
         if (ppb > 0) {
             // Crystal runs fast: reduce FTW to output a lower (corrected) frequency
             _ad_ftw_per_mhz_cal = AD9850_FTW_PER_MHZ - delta_per_mhz;
