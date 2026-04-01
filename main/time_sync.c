@@ -480,15 +480,19 @@ bool time_sync_get(struct timeval *tv) {
     return true;
 }
 
-// WSPR transmissions must start within ±1 second of the even UTC minute boundary.
-// The specification says transmissions "nominally start one second into an even
-// UTC minute" (e.g. 00:00:01, 00:02:01, ...).  This function computes how many
-// seconds remain until the next such boundary so the scheduler can sleep
-// efficiently and then fine-align to within a few milliseconds.
+// WSPR transmissions must start at the 2nd second of an even UTC minute boundary.
+// Per the official MEPT_JT / Wsprry-Pi specification: transmissions start at
+// hh:00:02, hh:02:02, ... (second 2 of each 120-second slot).
+// Reference: https://wsprry-pi.readthedocs.io/en/latest/About_WSPR/
+// Reference: https://qrp-labs.com/ultimate3/u3info/dt.html (DT investigation)
+// The G4JNT 2009 document says ":01" but the authoritative MEPT_JT spec says ":02".
 //
 // The 2-minute cycle period comes from the WSPR frame duration:
 //   162 symbols * 8192/12000 s/symbol ≈ 110.6 s
 // rounded up to 120 s (2 minutes) for the standard 2-minute slot grid.
+// WSPR spec requires the first symbol at second :02 of the even minute.
+// open window: p==2,3,4 (target is 2; allow up to 4 for late-start detection).
+// Return value when p<2: distance to phase=2, not to phase=0.
 int32_t time_sync_secs_to_next_tx(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -497,12 +501,20 @@ int32_t time_sync_secs_to_next_tx(void) {
     // Position within the current 2-minute (120-second) slot window
     uint32_t p = (uint32_t)(now % 120u);
 
-    // Return 0 if we are at or within the first 3 seconds of the window:
-    // this gives the scheduler a generous window to catch the boundary
-    // without missing the transmission slot.
-    if (p <= 3u) {
+    // Open window: phase 2, 3, or 4.
+    // Target is phase=2 (second :02 of even minute per WSPR spec).
+    // Allow up to phase=4 so the scheduler can detect a late start and skip.
+    if (p >= 2u && p <= 4u) {
         return 0;
-    } else {
-        return (int32_t)(120u - p); // seconds until the next even-minute boundary
     }
+
+    // p<2: distance to phase=2 of this current window.
+    // p==0 -> return 2, p==1 -> return 1.
+    if (p < 2u) {
+        return (int32_t)(2u - p);
+    }
+
+    // p>4: seconds remaining until phase=2 of the NEXT 120-second window.
+    // = (120 - p) + 2 = 122 - p
+    return (int32_t)(122u - p);
 }
