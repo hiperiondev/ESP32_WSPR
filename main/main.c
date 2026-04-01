@@ -44,14 +44,7 @@ static const char *TAG = "wspr_main";
 #define WSPR_TONE_DEN 256UL    // tone denominator
 
 // Inline helper: read esp_timer and truncate to 32 bits.
-// Using a dedicated inline instead of repeating the cast expression guarantees
-// that every elapsed measurement in the symbol loop uses the same truncation
-// epoch.  Unsigned 32-bit subtraction wraps correctly when the 32-bit counter
-// rolls over (~71.6 min), so "timer_us32() - tx_start_us" is always valid as
-// long as at most 4294 seconds have elapsed since tx_start_us was captured
-// (a 110-second WSPR frame fits comfortably within that window).
 static inline uint32_t timer_us32(void) {
-    // Intentional truncation: cast discards upper 32 bits of the 64-bit timer.
     return (uint32_t)esp_timer_get_time();
 }
 
@@ -77,11 +70,6 @@ static volatile int g_symbol_idx = 0;
 static bool g_pre_armed = false;
 static uint32_t g_pre_arm_base_hz = 0;
 
-/**
- * @brief Convert an esp_reset_reason_t to a human-readable string.
- * @param r Reset reason code from esp_reset_reason().
- * @return Constant string describing the reset cause.
- */
 static const char *reset_reason_to_str(esp_reset_reason_t r) {
     switch (r) {
         case ESP_RST_POWERON:
@@ -109,38 +97,37 @@ static const char *reset_reason_to_str(esp_reset_reason_t r) {
     }
 }
 
-/**
- * @brief Rebuild the list of enabled bands from the current configuration.
- *
- * Scans band_enabled[] and populates g_hop_active_bands[].
- * Falls back to 40 m if no band is enabled to guarantee at least one TX target.
- * Resets g_hop_ptr if it would be out of range after the rebuild.
- */
 static void rebuild_active_bands(void) {
+    // Save the band currently pointed to before rebuilding the list.
+    int prev_band = (g_hop_ptr < g_hop_active_count) ? g_hop_active_bands[g_hop_ptr] : -1;
+
     g_hop_active_count = 0;
     for (int i = 0; i < BAND_COUNT; i++) {
         if (g_cfg.band_enabled[i])
             g_hop_active_bands[g_hop_active_count++] = i;
     }
+
     // Safety fallback: always have at least one active band
     if (g_hop_active_count == 0) {
         g_hop_active_bands[0] = BAND_40M;
         g_hop_active_count = 1;
     }
-    // Clamp pointer to valid range after rebuild
-    if (g_hop_ptr >= g_hop_active_count)
-        g_hop_ptr = 0;
+
+    g_hop_ptr = 0; // default: fall back to first band if prev_band not found
+    if (prev_band >= 0) {
+        for (int i = 0; i < g_hop_active_count; i++) {
+            if (g_hop_active_bands[i] == prev_band) {
+                g_hop_ptr = i;
+                break;
+            }
+        }
+    }
+
     ESP_LOGI(TAG, "Active bands: %d", g_hop_active_count);
     // Clear the flag so the scheduler does not call rebuild again next slot
-    g_cfg.bands_changed = false; // clear the flag after rebuild to prevent unnecessary calls in scheduler
+    g_cfg.bands_changed = false;
 }
 
-/**
- * @brief Select the next band according to the hop policy.
- *
- * @param force_next    Advance the round-robin pointer (hop to next band).
- * @param force_rebuild Re-scan the enabled-band list before selecting.
- */
 static void select_next_band(bool force_next, bool force_rebuild) {
     if (force_rebuild || g_hop_active_count == 0)
         rebuild_active_bands();
@@ -154,27 +141,9 @@ static void select_next_band(bool force_next, bool force_rebuild) {
              (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx));
 }
 
-/**
- * @brief Encode and transmit one complete WSPR message (162 symbols).
- *
- * WSPR (Weak Signal Propagation Reporter) uses 4-FSK modulation with
- * 1.4648 Hz tone spacing. Each of the 162 symbols represents one of four
- * frequencies separated by multiples of that spacing. A full transmission
- * lasts 162 * 8192/12000 s ≈ 110.6 seconds.
- *
- * Timing is derived from the high-resolution ESP timer. The target deadline
- * for symbol N is N * 682 666.67 µs after the first symbol. The inner loop
- * uses coarse vTaskDelay() for long waits and busy-waits (taskYIELD) for
- * the final microseconds, keeping scheduling jitter below one RTOS tick.
- *
- * For compound callsigns (Type-2) or 6-char locators (Type-3), this function
- * alternates between the primary message and the companion Type-3 message on
- * successive even-minute slots using tx_slot_parity.
- */
 static void wspr_transmit(void) {
     uint8_t symbols[WSPR_SYMBOLS];
     int enc_result;
-    // Snapshot all config fields needed for this TX under the mutex
     char snap_callsign[CALLSIGN_LEN];
     char snap_locator[LOCATOR_LEN];
     uint8_t snap_power;
@@ -188,31 +157,20 @@ static void wspr_transmit(void) {
     snap_region = g_cfg.iaru_region;
     web_server_cfg_unlock();
 
-    // Refuse to transmit if essential parameters are missing
     if (snap_callsign[0] == '\0' || snap_locator[0] == '\0') {
         ESP_LOGE(TAG, "TX skipped: callsign or locator is empty");
-        g_pre_armed = false; // clear pre-arm on early exit
+        g_pre_armed = false;
         return;
     }
 
-    // Determine which WSPR message type is required for this callsign/locator:
-    // Type-1: simple callsign + 4-char locator (most common case).
-    // Type-2: compound callsign with '/' (e.g. "PJ4/K1ABC"), no locator in this frame.
-    // Type-3: companion to Type-2 or Type-1 with 6-char locator; carries hashed
-    //         callsign + full 6-char sub-square in alternating even-minute slots.
     wspr_msg_type_t msg_type = wspr_encode_type(snap_callsign, snap_locator);
 
     if (msg_type == WSPR_MSG_TYPE_1) {
-        // Standard single-slot transmission: callsign + 4-char grid + power
         enc_result = wspr_encode(snap_callsign, snap_locator, snap_power, symbols);
     } else {
-        // Two-slot alternation: parity=0 -> primary frame, parity=1 -> Type-3 companion
         if (snap_parity == 0) {
             enc_result = wspr_encode(snap_callsign, snap_locator, snap_power, symbols);
         } else {
-            // Build a 6-char locator for the Type-3 companion frame.
-            // If the stored locator is shorter than 6 chars, append "aa" (sub-square AA)
-            // so decoding software can still associate the hash with the primary frame.
             char loc6[7];
             size_t loc_len = strlen(snap_locator);
             if (loc_len >= 6) {
@@ -224,7 +182,6 @@ static void wspr_transmit(void) {
             enc_result = wspr_encode_type3(snap_callsign, loc6, snap_power, symbols);
         }
 
-        // Toggle parity for the next slot so the frames alternate correctly
         web_server_cfg_lock();
         g_cfg.tx_slot_parity ^= 1u;
         web_server_cfg_unlock();
@@ -241,40 +198,27 @@ static void wspr_transmit(void) {
         return;
     }
 
-    // Determine the carrier base frequency.
-    // WSPR transmitters place the audio-center tone at 1500 Hz above the dial frequency,
-    // so the base_hz here is dial_freq + 1500 Hz. The four WSPR tones then sit at
-    // base_hz + 0, +1.46, +2.93, +4.39 Hz (tone 0 to 3 * 1.4648 Hz spacing).
     uint32_t base_hz;
     if (g_pre_armed) {
-        // Oscillator and LPF were already programmed during the pre-arm phase (phase==0)
         base_hz = g_pre_arm_base_hz;
     } else {
         base_hz = config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx);
         oscillator_set_freq(base_hz);
         gpio_filter_select(BAND_FILTER[g_band_idx]);
-        // Wait for LPF relay contacts to settle before enabling RF output
         vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
     }
 
     g_pre_armed = false;
 
-    // Begin TX: mark oscillator busy (defers any pending calibration changes)
     oscillator_tx_begin();
     oscillator_enable(true);
     g_tx_active = true;
-    //  Use timer_us32() so all elapsed reads share the same truncation epoch.
     uint32_t tx_start_us = timer_us32();
 
     ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d pre_armed=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
              (unsigned long)config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)snap_parity,
-             (int)(g_pre_arm_base_hz != 0), // log whether pre-arm path was taken
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
+             (int)(g_pre_arm_base_hz != 0), (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
-    // Symbol transmission loop: send all 162 4-FSK symbols with precise timing.
-    // Each symbol period is exactly 8192/12000 s = 682 666.67 µs.
-    // The inner timing loop compares elapsed*3 against the 3x target to avoid
-    // floating-point division while maintaining microsecond accuracy.
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;
 
@@ -282,36 +226,19 @@ static void wspr_transmit(void) {
         esp_task_wdt_reset();
 #endif
 
-        // Compute tone offset in milli-Hz for this symbol value (0-3).
-        // Formula: offset_mHz = symbol * 375000 / 256 = symbol * 1464.844 mHz
-        // This matches WSPR spec: tone spacing = 12000/8192 Hz = 1.4648 Hz
         int32_t tone_offset_millihz = (int32_t)(((uint32_t)symbols[i] * WSPR_TONE_NUM + (WSPR_TONE_DEN / 2UL)) / WSPR_TONE_DEN);
         oscillator_set_freq_mhz(base_hz, tone_offset_millihz);
 
-        // Wait until the deadline for the end of this symbol period.
-        // Use coarse sleep for most of the wait, then busy-wait the last millisecond.
         uint32_t target_x3 = (uint32_t)(i + 1) * WSPR_PERIOD_3X_US;
         for (;;) {
-            // Use timer_us32() for consistent 32-bit epoch
-            // subtraction.  Unsigned subtraction wraps correctly across the 32-bit
-            // rollover boundary (~71.6 min after boot), so this is safe for the full
-            // 110-second WSPR frame regardless of when in the uptime it starts.
             uint32_t elapsed = timer_us32() - tx_start_us;
 
             if (elapsed * 3UL >= target_x3)
                 break;
-            // Guard against unsigned wraparound in rem_x3.
-            // Without this clamp, if elapsed*3UL equals or exceeds target_x3 between
-            // the break-check above and this line (possible with preemption jitter),
-            // the subtraction would underflow to ~4 billion, making rem_us ~1.4 billion
-            // and sleep_ms ~1.4 million -- stalling the TX loop for ~24 days.
-            // The guard converts that race window to rem_x3=0, which falls through to
-            // the taskYIELD path and exits on the next iteration's break check.
             uint32_t elapsed_x3 = elapsed * 3UL;
             uint32_t rem_x3 = (elapsed_x3 < target_x3) ? (target_x3 - elapsed_x3) : 0u;
             uint32_t rem_us = rem_x3 / 3UL;
             if (rem_us > 10000u) {
-                // More than 10 ms remaining: sleep most of it, keep 5 ms margin
                 uint32_t sleep_ms = rem_us / 1000u;
                 if (sleep_ms > 5u)
                     sleep_ms -= 5u;
@@ -319,16 +246,13 @@ static void wspr_transmit(void) {
                     sleep_ms = 1u;
                 vTaskDelay(pdMS_TO_TICKS(sleep_ms));
             } else if (rem_us > 1000u) {
-                // 1-10 ms remaining: yield one RTOS tick
                 vTaskDelay(1);
             } else {
-                // Final microseconds: cooperative yield without sleeping
                 taskYIELD();
             }
         }
 
 #if CONFIG_WSPR_SYMBOL_OVERRUN_LOG
-        // Warn if the actual symbol boundary was missed by more than 10 ms
         {
             uint32_t actual_us = timer_us32() - tx_start_us;
             uint32_t deadline_us = target_x3 / 3UL;
@@ -340,7 +264,6 @@ static void wspr_transmit(void) {
 #endif
     }
 
-    // Disable RF output and release the oscillator for calibration updates
     oscillator_enable(false);
     g_tx_active = false;
     oscillator_tx_end();
@@ -349,15 +272,6 @@ static void wspr_transmit(void) {
     ESP_LOGI(TAG, "TX complete");
 }
 
-/**
- * @brief FreeRTOS task: update the web status panel once per second.
- *
- * Reads the wall clock, current band, frequency, and TX state, then pushes
- * a status snapshot to the web server. Also computes and stores the
- * boot wall-clock time once the first NTP/GPS sync has occurred.
- *
- * @param arg Unused task argument.
- */
 static void status_task(void *arg) {
     char time_str[24] = "---";
     char freq_str[24] = "---";
@@ -372,7 +286,6 @@ static void status_task(void *arg) {
             gmtime_r(&tv.tv_sec, &t);
             strftime(time_str, sizeof(time_str), "%H:%M:%S UTC", &t);
 
-            // Compute and store the boot wall-clock time on the first sync
             if (!reboot_info_time_set) {
                 time_t boot_ts = tv.tv_sec - (time_t)g_boot_uptime_sec;
                 struct tm bt;
@@ -390,7 +303,6 @@ static void status_task(void *arg) {
         bool tx_en = g_cfg.tx_enabled;
         web_server_cfg_unlock();
 
-        // Build the frequency string: dial_freq + 1500 Hz (WSPR center offset)
         if (g_band_idx >= 0) {
             uint32_t freq_hz = config_band_freq_hz((iaru_region_t)region_snap, (wspr_band_t)g_band_idx) + 1500u;
             uint32_t mhz_int = freq_hz / 1000000u;
@@ -398,7 +310,6 @@ static void status_task(void *arg) {
             snprintf(freq_str, sizeof(freq_str), "%u.%04u MHz", (unsigned)mhz_int, (unsigned)khz_frac);
         }
 
-        // Countdown to next even-minute TX window; -1 if clock not yet synced
         int32_t next_tx = time_ok ? time_sync_secs_to_next_tx() : -1;
 
         web_server_update_status(time_ok, time_str, band_name, freq_str, next_tx, g_tx_active, tx_en, g_symbol_idx);
@@ -407,24 +318,6 @@ static void status_task(void *arg) {
     }
 }
 
-/**
- * @brief FreeRTOS task: WSPR transmission scheduler.
- *
- * Implements the core WSPR timing protocol:
- * - Waits for time synchronization (NTP or GPS).
- * - Blocks until tx_enabled is set via the web UI.
- * - Sleeps until the next even-minute UTC boundary (HH:MM:00).
- * - Pre-arms the oscillator and LPF relay at phase=0 (second 0 of the slot).
- * - Aligns to the second boundary with sub-millisecond precision.
- * - Calls wspr_transmit() to send 162 symbols over ~110.6 s.
- * - Applies duty-cycle throttling and frequency hopping between slots.
- *
- * Per the WSPR specification, all transmissions must start within ±1 s of
- * the even-minute boundary. This scheduler targets phase=1 (one second past
- * the boundary) for compatibility with the majority of WSPR decoders.
- *
- * @param arg Unused task argument.
- */
 static void scheduler_task(void *arg) {
     ESP_LOGI(TAG, "Scheduler started -- waiting for time sync");
 
@@ -439,15 +332,15 @@ static void scheduler_task(void *arg) {
     // Initial band selection: build the active list and choose the first band
     select_next_band(false, true);
 
-    uint32_t last_hop_ts = 0;
-    // Duty-cycle accumulator: TX fires when accum >= 100; 20% default = fire every 5 slots
-    // start at 0 so the first slot obeys the duty-cycle contract.
-    // With 100u the first slot always transmitted regardless of the configured %.
+    uint32_t s_last_hop_slot = 0;
+    bool s_hop_anchored = false;
+    bool s_duty_primed = false; // true after first-slot pre-load
     uint16_t s_duty_accum = 0u;
+
     bool time_synced_logged = false;
 
     while (1) {
-        // Gate on time sync: WSPR transmissions require UTC accuracy within ±1 s
+        // Gate on time sync: WSPR transmissions require UTC accuracy within +-1 s
         if (!time_sync_is_ready()) {
 #if CONFIG_WSPR_TASK_WDT_ENABLE
             esp_task_wdt_reset();
@@ -475,11 +368,9 @@ static void scheduler_task(void *arg) {
 
         bool do_skip = false;
 
-        // Compute seconds until the next even-minute WSPR TX window
         int32_t wait_sec = time_sync_secs_to_next_tx();
         if (wait_sec >= 0) {
             ESP_LOGI(TAG, "Next TX in %d s (band=%s)", wait_sec, BAND_NAME[g_band_idx]);
-            // Sleep most of the wait period in 1-second chunks so the WDT stays fed
             if (wait_sec > 3) {
                 uint32_t sleep_ms = (uint32_t)(wait_sec - 2) * 1000u;
                 while (sleep_ms > 0u) {
@@ -492,9 +383,6 @@ static void scheduler_task(void *arg) {
                 }
             }
 
-            // Fine-grained phase alignment: poll every 10 ms for the slot boundary.
-            // Pre-arm the oscillator and LPF relay at phase=0 (second 0 of the slot)
-            // so they are settled before RF is enabled at phase=1.
             {
                 web_server_cfg_lock();
                 uint8_t pre_snap_region = g_cfg.iaru_region;
@@ -507,9 +395,8 @@ static void scheduler_task(void *arg) {
                     uint32_t phase = (uint32_t)(tv_align.tv_sec % 120u);
 
                     if (phase == 0u) {
-                        // Pre-arm at phase 0
                         if (!pre_armed_local) {
-                            g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx) - 2u;
+                            g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx);
                             oscillator_set_freq(g_pre_arm_base_hz);
                             gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
                             g_pre_armed = true;
@@ -517,10 +404,8 @@ static void scheduler_task(void *arg) {
                             ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
                         }
                     } else if (phase == 1u) {
-                        // Hit exactly +1.0 second boundary. Begin transmission immediately.
                         break;
                     } else if (phase >= 2u && phase <= 4u) {
-                        // We woke up late; miss this TX slot to avoid overlapping the next window.
                         ESP_LOGW(TAG, "Missed TX window (phase=%lu), skipping slot", (unsigned long)phase);
                         g_pre_armed = false;
                         g_pre_arm_base_hz = 0;
@@ -528,13 +413,11 @@ static void scheduler_task(void *arg) {
                         break;
                     }
 
-                    // 1 ms tick delay for tight, predictable alignment without watchdog trips
                     vTaskDelay(pdMS_TO_TICKS(1));
 
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                     esp_task_wdt_reset();
 #endif
-                    // Abort pre-arm loop if TX was disabled while waiting
                     web_server_cfg_lock();
                     bool still_en = g_cfg.tx_enabled;
                     web_server_cfg_unlock();
@@ -547,10 +430,6 @@ static void scheduler_task(void *arg) {
                     }
                 }
 
-                // Sub-second alignment: spin until the wall clock is within 5 ms of
-                // a full second boundary to minimize the phase error at TX start.
-                // WSPR decoders accept up to ±2 s of start-time offset, but tighter
-                // alignment improves decoder SNR on marginal signals.
                 if (!do_skip) {
                     struct timeval tv_align;
                     gettimeofday(&tv_align, NULL);
@@ -564,13 +443,11 @@ static void scheduler_task(void *arg) {
                                 vTaskDelay(pdMS_TO_TICKS(sleep_ms));
                         }
 
-                        // Busy-wait for the final few milliseconds
                         do {
                             gettimeofday(&tv_align, NULL);
                             usec_now = (uint32_t)tv_align.tv_usec;
                             taskYIELD();
 #if CONFIG_WSPR_TASK_WDT_ENABLE
-
                             esp_task_wdt_reset();
 #endif
                         } while (usec_now >= 5000u && usec_now < 950000u);
@@ -584,7 +461,6 @@ static void scheduler_task(void *arg) {
             gettimeofday(&tv, NULL);
             uint32_t now = (uint32_t)(tv.tv_sec & 0xFFFFFFFFUL);
 
-            // Read hop parameters and check if the band list needs rebuilding
             web_server_cfg_lock();
             bool hop_en = g_cfg.hop_enabled;
             uint32_t hop_intv = g_cfg.hop_interval_sec;
@@ -595,26 +471,30 @@ static void scheduler_task(void *arg) {
             if (hop_intv == 0u)
                 hop_intv = 120u;
 
-            // Frequency hopping: advance to the next band when the interval expires
-            bool do_hop = hop_en && (now - last_hop_ts) >= hop_intv;
+            uint32_t current_slot = now / 120u;
+            uint32_t hop_slots = (hop_intv >= 120u) ? (hop_intv / 120u) : 1u;
+
+            bool do_hop;
+            if (!s_hop_anchored) {
+                do_hop = false;
+                s_last_hop_slot = current_slot;
+                s_hop_anchored = true;
+            } else {
+                do_hop = hop_en && ((current_slot - s_last_hop_slot) >= hop_slots);
+            }
 
             if (do_hop || g_band_idx < 0 || need_rebuild) {
                 select_next_band(do_hop, need_rebuild || g_band_idx < 0);
-                last_hop_ts = now;
+                if (do_hop)
+                    s_last_hop_slot = current_slot;
 
-                // If already pre-armed on the old band, re-arm on the new band
                 if (g_pre_armed) {
                     web_server_cfg_lock();
                     uint8_t new_region = g_cfg.iaru_region;
                     web_server_cfg_unlock();
-                    uint32_t new_base_hz = config_band_freq_hz((iaru_region_t)new_region, (wspr_band_t)g_band_idx) + 1500u;
+                    uint32_t new_base_hz = config_band_freq_hz((iaru_region_t)new_region, (wspr_band_t)g_band_idx);
                     if (new_base_hz != g_pre_arm_base_hz) {
                         g_pre_arm_base_hz = new_base_hz;
-                        // Disable RF before reprogramming frequency and
-                        // switching the LPF relay to prevent any brief cross-band
-                        // emission during the relay transition.  The oscillator is
-                        // not actively transmitting here (oscillator_tx_begin has not
-                        // been called yet), but this is a defensive safety measure.
                         oscillator_enable(false);
                         oscillator_set_freq(g_pre_arm_base_hz);
                         gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
@@ -624,12 +504,24 @@ static void scheduler_task(void *arg) {
                 }
             }
 
-            // Duty-cycle check: accumulate the percentage; fire when >= 100
-            // This gives a deterministic slot selection (not random), e.g.
-            // duty=20 fires slots 0, 5, 10, ... (every fifth 2-minute window).
+            // Prime the duty accumulator on the very first slot so that
+            // the first TX fires immediately.
             web_server_cfg_lock();
             uint8_t duty = g_cfg.tx_duty_pct;
             web_server_cfg_unlock();
+
+            if (!s_duty_primed) {
+                // Load enough credit so that the first add brings accum to >= 100.
+                // Clamp to 99 so that a duty of 100 (always TX) still takes one add
+                // to fire and the normal accumulator logic remains uniform.
+                if (duty > 0u && duty < 100u) {
+                    s_duty_accum = (uint16_t)(100u - duty);
+                } else if (duty >= 100u) {
+                    s_duty_accum = 0u; // will fire immediately (100 added below)
+                }
+                // duty==0: leave at 0; the duty>0 guard below prevents TX anyway.
+                s_duty_primed = true;
+            }
 
             bool do_tx = false;
             if (duty > 0u) {
@@ -644,6 +536,25 @@ static void scheduler_task(void *arg) {
                 g_pre_armed = false;
                 g_pre_arm_base_hz = 0;
                 do_skip = true;
+            }
+        } else {
+            web_server_cfg_lock();
+            bool still_tx_en = g_cfg.tx_enabled;
+            uint8_t duty_snap = g_cfg.tx_duty_pct;
+            web_server_cfg_unlock();
+
+            if (still_tx_en && duty_snap > 0u) {
+                if (!s_duty_primed) {
+                    // Same first-slot priming as the normal path above
+                    if (duty_snap < 100u)
+                        s_duty_accum = (uint16_t)(100u - duty_snap);
+                    s_duty_primed = true;
+                }
+                s_duty_accum += (uint16_t)duty_snap;
+                // Clamp: don't allow unbounded growth if many windows are missed in a row
+                if (s_duty_accum > 200u)
+                    s_duty_accum = 200u;
+                ESP_LOGD(TAG, "Duty accum (missed window): accum=%u", (unsigned)s_duty_accum);
             }
         }
 
@@ -662,13 +573,11 @@ static void scheduler_task(void *arg) {
 
 void app_main(void) {
 
-    // GPS mode forces UTC timezone so NMEA timestamps are not affected by locale
 #if defined(CONFIG_WSPR_TIME_GPS)
     setenv("TZ", "UTC0", 1);
     tzset();
 #endif
 
-    // Record uptime at boot to compute the boot wall-clock time after first NTP sync
     g_boot_uptime_sec = (uint32_t)(esp_log_timestamp() / 1000u);
 
     esp_reset_reason_t reset_rsn = esp_reset_reason();
@@ -676,46 +585,34 @@ void app_main(void) {
     ESP_LOGI(TAG, "=== WSPR Transmitter for ESP32 ===");
     ESP_LOGI(TAG, "Reset reason: %s", reset_reason_to_str(reset_rsn));
 
-    // Initialize NVS and load persistent configuration
     ESP_ERROR_CHECK(config_init());
     ESP_ERROR_CHECK(config_load(&g_cfg));
 
     ESP_LOGI(TAG, "Callsign: %s  Locator: %s  Power: %d dBm", g_cfg.callsign, g_cfg.locator, g_cfg.power_dbm);
 
-    // Configure the three LPF-select GPIO pins and drive them to filter 0
     ESP_ERROR_CHECK(gpio_filter_init());
 
-    // Auto-detect oscillator hardware (Si5351 via I2C, then AD9850 via GPIO)
     ESP_ERROR_CHECK(oscillator_init());
-    oscillator_enable(false); // ensure RF output is off at startup
+    oscillator_enable(false);
 
-    // Apply any stored crystal calibration offset
     oscillator_set_cal(g_cfg.xtal_cal_ppb);
 
-    // Connect to WiFi in STA mode; fall back to soft-AP if credentials are absent
     ESP_ERROR_CHECK(wifi_manager_start(g_cfg.wifi_ssid, g_cfg.wifi_pass));
 
-    // Start NTP or GPS time sync (selected at build time via Kconfig)
     ESP_ERROR_CHECK(time_sync_init(g_cfg.ntp_server));
 
-    // Start the HTTP configuration server; creates config and status mutexes
     ESP_ERROR_CHECK(web_server_start(&g_cfg));
 
     ESP_LOGI(TAG, "Web config at http://%s", wifi_manager_ip());
 
-    // Store hardware identity in the status cache for the web UI RF Hardware row
     web_server_set_hw_status(oscillator_hw_ok(), oscillator_hw_name());
 
-    // Store reset reason; boot time string is filled later after first NTP sync
     web_server_set_reboot_info(NULL, reset_reason_to_str(reset_rsn));
 
-    // Create the status update task (lower priority than scheduler)
     xTaskCreate(status_task, "wspr_status", 6144, NULL, 3, NULL);
 
-    // Create the WSPR scheduler task (higher priority: drives precise TX timing)
     xTaskCreate(scheduler_task, "wspr_sched", 8192, NULL, 5, NULL);
 
-    // app_main may return to the idle task; keep it alive with a long sleep loop
     while (1)
         vTaskDelay(pdMS_TO_TICKS(10000));
 }

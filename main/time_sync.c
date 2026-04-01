@@ -496,20 +496,14 @@ bool time_sync_get(struct timeval *tv) {
 int32_t time_sync_secs_to_next_tx(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    // Calculation updated to target Second 1 (Hardware Setup)
     uint32_t p = (uint32_t)(tv.tv_sec % 120u);
 
-    // Returns 0 if we are in the hardware preparation window (Second 1)
-    // or the late-start detection window (Seconds 2-4).
-    if (p == 1u || (p >= 2u && p <= 4u)) {
-        return 0;
+    if (p == 1u) {
+        return 0; // exactly at the target start second
     }
-
-    // If we are at Second 0, we are 1 second away from the prep window.
     if (p == 0u) {
-        return 1;
+        return 1; // one second until the prep window
     }
-
-    // Calculate distance to the next even-minute Second 1.
+    // p >= 2: wait for the next cycle's second 1 (121 - p)
     return (int32_t)(121u - p);
 }
