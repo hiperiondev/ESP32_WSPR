@@ -51,14 +51,14 @@
 
 **WSPR Transmitter** is a complete, standalone WSPR (Weak Signal Propagation Reporter) beacon transmitter firmware built on Espressif's **ESP-IDF** framework for the ESP32 microcontroller family. Unlike most hobby WSPR projects that rely on the Arduino ecosystem, this firmware is written in pure C against the native ESP-IDF APIs, giving it access to FreeRTOS task management, the native SNTP client, the `esp_wifi` stack, `nvs_flash` persistent storage, and the `esp_http_server` web server — all without the overhead of the Arduino HAL.
 
-The project is designed to be production-ready for unattended beacon operation: it encodes WSPR Type-1 messages entirely on-chip, drives an RF oscillator (Si5351A or AD9850) with sub-Hz symbol resolution, selects the correct band-pass / low-pass filter automatically via a 3-bit GPIO bus, synchronises time via NTP or GPS, and exposes a responsive single-page web application for configuration and monitoring. All user settings are persisted in the ESP32's NVS (non-volatile storage) flash partition and survive power cycles.
+The project is designed to be production-ready for unattended beacon operation: it encodes WSPR Type-1, Type-2, and Type-3 messages entirely on-chip, drives an RF oscillator (Si5351A or AD9850) with sub-Hz symbol resolution, selects the correct low-pass filter automatically via a 3-bit GPIO bus, synchronises time via NTP or GPS (with optional PPS), and exposes a responsive single-page web application for configuration and monitoring. All user settings are persisted in the ESP32's NVS (non-volatile storage) flash partition and survive power cycles.
 
 The WSPR mode occupies roughly 6 Hz of RF bandwidth and can be decoded at signal-to-noise ratios as low as −28 dB in a 2.5 kHz reference bandwidth, making it extremely useful for propagation studies using very low power levels. Once transmitted, reception reports from automated WSPR stations worldwide are automatically uploaded to [WSPRnet](https://www.wsprnet.org), where a mapping interface lets you see exactly how far your signal travelled.
 
 ### Key design decisions
 
-- **ESP-IDF only** — no Arduino, no third-party I2C libraries. All oscillator drivers are written from scratch against the IDF `driver/i2c.h` and `driver/gpio.h` APIs.
-- **Dual oscillator support** — the firmware auto-detects a Si5351A at boot via I2C ACK probe, then falls back to AD9850 (write-only SPI bit-bang), then falls back to a silent dummy mode if neither is present — so the system never crashes on missing hardware.
+- **ESP-IDF only** — no Arduino, no third-party I2C libraries. All oscillator drivers are written from scratch against the IDF `driver/i2c_master.h` and `driver/gpio.h` APIs.
+- **Dual oscillator support** — the firmware auto-detects a Si5351A at boot via I2C ACK probe, then falls back to AD9850 (write-only GPIO bit-bang serial), then falls back to a silent dummy mode if neither is present — so the system never crashes on missing hardware.
 - **Integer-only arithmetic** — the entire WSPR encoder, Si5351 PLL divider calculation, and AD9850 tuning-word computation use 32-bit integer maths only. No floating point, no `double`, making the code efficient on the Xtensa LX6 without enabling the soft-float library.
 - **Embedded single-file SPA** — the web interface is compiled into the firmware as a C header file; there is no filesystem component and no SPIFFS/LittleFS partition needed.
 - **Multilingual WebUI** — English and Spanish UI string tables are provided as separate headers (`webui_en.h` / `webui_es.h`) selected at compile time via Kconfig.
@@ -144,11 +144,11 @@ Output: 162 four-FSK symbols (values 0, 1, 2, 3)
 
 ### Timing
 
-WSPR transmissions **must** begin at the start of an even UTC minute (00:00, 00:02, 00:04, …). The firmware calculates `next_tx = (now - (now % 120)) + 120 + 1` — adding one second to allow relay contacts to settle — and schedules the transmission accordingly. Time accuracy must be better than ±1 second; the firmware waits for NTP or GPS synchronisation before attempting any transmission.
+WSPR transmissions **must** begin at the start of an even UTC minute (00:00, 00:02, 00:04, …). The scheduler computes the time remaining to the next even-minute boundary using `now % 120` and enters a fine-grained spin-wait in the final two seconds to align the first symbol to within a few milliseconds of the boundary. The firmware refuses to start transmitting until time synchronisation (NTP or GPS) has occurred, guaranteeing that the wall clock is valid.
 
 ### Duty cycle
 
-The WSPR community standard recommends transmitting in at most 20% of available 2-minute slots, leaving the remainder for receiving. This firmware implements a configurable duty cycle percentage (0–100%) and a random slot-selection mechanism to distribute transmissions across time and avoid systematic collisions with other beacons.
+The WSPR community standard recommends transmitting in at most 20% of available 2-minute slots, leaving the remainder for receiving. This firmware implements a configurable duty cycle percentage (0–100%) using a deterministic accumulator: `accumulator += duty_pct` each slot; a slot is used when the accumulator reaches or exceeds 100, at which point 100 is subtracted. This produces a perfectly even distribution of transmit slots without any randomness.
 
 <div align="right">
   <a href="#readme-top">
@@ -164,16 +164,17 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 - ✅ **Dual oscillator support** — Si5351A (I2C, auto-detected) and AD9850 (GPIO bit-bang, assumed present); graceful dummy mode if neither found
 - ✅ **12 WSPR bands** — 2200 m through 10 m (137 kHz to 28 MHz)
 - ✅ **IARU Region selection** — Region 1, 2, or 3 for correct 60 m dial frequency
-- ✅ **Automatic low-pass filter selection** — 3-bit BCD GPIO bus, 8 filter positions, relay-settle delay
-- ✅ **Time sync via NTP** (SNTP, selectable server) or **GPS** (NMEA-0183 GPRMC/GNRMC via UART)
+- ✅ **Automatic low-pass filter selection** — 3-bit BCD GPIO bus, 8 filter positions, configurable relay-settle delay
+- ✅ **Time sync via NTP** (SNTP, selectable server) or **GPS** (NMEA-0183 $GPRMC/$GNRMC/$GPZDA/$GNZDA via UART, with optional PPS)
 - ✅ **Wi-Fi STA mode** with soft-AP fallback (192.168.4.1) and background reconnect timer
 - ✅ **Frequency hopping** — automatic rotation through enabled bands every N seconds (min. 120 s = 1 TX slot)
-- ✅ **TX duty cycle** — configurable 0–100% with random slot selection
+- ✅ **TX duty cycle** — configurable 0–100% with deterministic accumulator-based slot selection
 - ✅ **Crystal calibration** — ±ppb correction stored in NVS, applied to all frequency calculations
 - ✅ **Embedded single-page web application** — no SPIFFS, no external files; entirely self-contained
 - ✅ **REST API** — JSON endpoints for config read/write, status polling, Wi-Fi scan, TX toggle, system reset
 - ✅ **NVS persistent config** — all settings survive power cycles; schema version check with automatic defaults on mismatch
 - ✅ **Multilingual UI** — English and Spanish (compile-time selection via Kconfig)
+- ✅ **HTTP Basic Authentication** — optional username/password protection for the web interface
 - ✅ **WSPRnet integration** — direct link from the WebUI to your station's spot map
 - ✅ **ESP-IDF native** — no Arduino dependency
 
@@ -192,7 +193,7 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 | Component | Specification |
 |---|---|
 | **Microcontroller** | Any ESP32 module (ESP32-WROOM-32, ESP32-DevKitC, ESP32-WROVER, etc.) |
-| **RF Oscillator** | Si5351A breakout board (I2C) **or** AD9850 DDS module (GPIO SPI) |
+| **RF Oscillator** | Si5351A breakout board (I2C) **or** AD9850 DDS module (GPIO serial) |
 | **Antenna** | Wire antenna appropriate for the operating band(s) |
 
 ### Recommended additional components
@@ -201,7 +202,7 @@ The WSPR community standard recommends transmitting in at most 20% of available 
 |---|---|
 | **Low-pass filter bank** | Harmonic suppression (legally required in most jurisdictions) |
 | **BCD decoder / relay driver** | Controlled by 3 GPIO lines (GPIO_A, GPIO_B, GPIO_C) |
-| **GPS module** (NMEA UART) | For GPS time sync (alternative to NTP) |
+| **GPS module** (NMEA UART) | For GPS time sync (alternative to NTP), especially for portable/remote use |
 | **Power amplifier** | Increase output beyond the ~10 dBm from the oscillator |
 | **3.3 V power supply** | Stable supply for the ESP32 and Si5351 |
 
@@ -279,10 +280,10 @@ main/
 ├── config.c / config.h     — Persistent config struct, NVS load/save/defaults, band tables
 ├── oscillator.c / .h       — Unified oscillator API; Si5351A + AD9850 drivers; auto-detect
 ├── gpio_filter.c / .h      — 3-bit GPIO LPF bank driver
-├── time_sync.c / .h        — NTP (SNTP) and GPS (NMEA UART) time sync abstraction
+├── time_sync.c / .h        — NTP (SNTP) and GPS (NMEA UART + optional PPS) time sync
 ├── wifi_manager.c / .h     — Wi-Fi STA + AP fallback; background reconnect; Wi-Fi scan
 ├── web_server.c / .h       — HTTP server; REST API; status cache; config mutex
-├── wspr_encode.c / .h      — Complete WSPR Type-1 encoder (integer-only)
+├── wspr_encode.c / .h      — Complete WSPR Type-1/2/3 encoder (integer-only)
 │
 ├── webui_strings.h         — Dispatch header: includes webui_en.h or webui_es.h
 ├── webui_en.h              — English UI string table
@@ -291,66 +292,77 @@ main/
 
 ### Task structure (FreeRTOS)
 
-The firmware runs three long-lived FreeRTOS tasks after `app_main()` returns:
+The firmware runs two long-lived FreeRTOS tasks after `app_main()` completes its initialisation sequence:
 
 ```
 app_main()
   │
   ├─ [initialisation sequence]
   │    config_init() → config_load()
-  │    oscillator_init() → oscillator_set_cal()
   │    gpio_filter_init()
+  │    oscillator_init() → oscillator_set_cal()
   │    wifi_manager_start()
-  │    web_server_start()
   │    time_sync_init()
+  │    web_server_start()
   │
-  ├─ xTaskCreate(scheduler_task)   — waits for time sync, computes next TX slot,
-  │                                   calls wspr_transmit(), handles hop logic
+  ├─ xTaskCreate(status_task,    stack=6144, priority=3)
+  │     — polls time/status every second,
+  │       calls web_server_update_status()
   │
-  └─ xTaskCreate(status_task)      — polls time/status every second,
-                                      calls web_server_update_status()
+  └─ xTaskCreate(scheduler_task, stack=8192, priority=5)
+        — waits for time sync, computes next TX slot,
+          calls wspr_transmit(), handles hop/duty logic
 ```
 
 ### WSPR transmission sequence (`wspr_transmit()`)
 
 ```
-1. Lock config mutex
-2. Encode 162 symbols (wspr_encode)
-3. Select LPF via gpio_filter_select(BAND_FILTER[band])
-4. vTaskDelay(10 ms) — relay settle time
-5. Set oscillator base frequency (dial + 1500 Hz offset)
+1. Lock config mutex; snapshot callsign, locator, power, region, parity
+2. Determine message type (wspr_encode_type)
+3. Encode 162 symbols:
+     - Type-1 or Type-2 (parity=0): wspr_encode()
+     - Type-3 companion  (parity=1): wspr_encode_type3()
+4. If not pre-armed:
+     a. Set oscillator base frequency (dial + 1500 Hz)
+     b. gpio_filter_select(BAND_FILTER[band])
+     c. vTaskDelay(CONFIG_WSPR_LPF_SETTLE_MS)  — relay settle
+5. oscillator_tx_begin()
 6. oscillator_enable(true)
 7. For each of 162 symbols:
-   a. oscillator_set_freq_mhz(base_hz, symbol * 1464843 mHz)
-   b. vTaskDelay(683 ms — symbol period)
+     a. oscillator_set_freq_mhz(base_hz, symbol × 1464844 mHz)
+     b. Spin-wait until symbol deadline (μs-accurate timer)
 8. oscillator_enable(false)
-9. Unlock config mutex
+9. oscillator_tx_end()
 ```
 
-Symbol tone offsets (in milli-Hz): `symbol × (12000000 / 8192) mHz = symbol × 1464.84375 Hz × 1000`
+> **Note:** Steps 4a–4c are also pre-executed speculatively at `phase=0` (second 0 of the even-minute boundary) to minimise latency between the boundary and the first symbol. The pre-arm state is tracked in `g_pre_armed`.
 
 ### Configuration structure (`wspr_config_t`)
 
-All settings are stored in a single NVS blob identified by the key `"cfg"` in namespace `"wspr"`. The current schema version is **4**.
+All settings are stored in a single NVS blob identified by the key `"cfg"` in namespace `"wspr"`. The current schema version is **5** (`CONFIG_SCHEMA_VERSION`).
 
 ```c
 typedef struct {
-    uint8_t  version;               // Schema version (must equal CONFIG_SCHEMA_VERSION)
-    char     callsign[12];          // Amateur callsign
-    char     locator[7];            // 4-char Maidenhead grid square
+    uint8_t  version;               // Schema version (must equal CONFIG_SCHEMA_VERSION = 5)
+    char     callsign[12];          // Amateur callsign (simple or compound with '/')
+    char     locator[7];            // 4-char or 6-char Maidenhead locator
     uint8_t  power_dbm;             // TX power in dBm (WSPR valid levels)
     char     wifi_ssid[33];         // Wi-Fi SSID
     char     wifi_pass[65];         // Wi-Fi password
+    char     ntp_server[64];        // NTP hostname or IP
     bool     band_enabled[12];      // One flag per WSPR band
     bool     hop_enabled;           // Enable automatic frequency hopping
     uint32_t hop_interval_sec;      // Hop interval in seconds (min. 120)
-    char     ntp_server[64];        // NTP hostname or IP
     bool     tx_enabled;            // Master TX enable/disable
     uint8_t  tx_duty_pct;           // TX duty cycle (0-100 %)
     int32_t  xtal_cal_ppb;          // Crystal calibration offset in ppb
     uint8_t  iaru_region;           // IARU region: 1, 2, or 3
+    bool     bands_changed;         // Runtime flag: band list needs rebuild (not stored in NVS)
+    uint8_t  tx_slot_parity;        // Type-2/3 alternation counter (not stored in NVS)
 } wspr_config_t;
 ```
+
+> **Note:** `bands_changed` and `tx_slot_parity` are runtime-only fields. They are always reset to `false`/`0` by `config_load()` and `config_defaults()`, and are never written to NVS.
 
 <div align="right">
   <a href="#readme-top">
@@ -388,10 +400,10 @@ The main page is divided into several configuration cards, a live status panel, 
 
 The **Station** card (Spanish: *Estación*) configures the WSPR message payload:
 
-- **Callsign** — Your amateur radio callsign (1–6 alphanumeric characters). The encoder automatically handles the G4JNT normalization rule (prepends a space if character 1 is a letter, so `G4JNT` becomes `[sp]G4JNT`).
-- **Maidenhead Locator** — 4-character grid square (e.g. `GF05`, `FN20`, `IO91`). 6-character sub-squares are rejected by the encoder since they cannot be represented in a WSPR Type-1 message.
-- **TX Power (dBm)** — Transmit power level. Must be one of the 19 valid WSPR levels: 0, 3, 7, 10, 13, 17, 20, 23, 27, 30, 33, 37, 40, 43, 47, 50, 53, 57, 60 dBm. Values outside this set are rounded to the nearest valid entry.
-- **XTAL Calibration (ppb)** — Crystal frequency correction in parts-per-billion. A positive value means the crystal runs fast (the firmware lowers the effective frequency to compensate). This value is applied to all oscillator frequency calculations. Changes take effect after a restart.
+- **Callsign** — Your amateur radio callsign. Simple callsigns (e.g. `W1AW`, `LU3VEA`, `G4JNT`) use up to 6 alphanumeric characters with a digit at position 2. Compound callsigns containing a slash (e.g. `PJ4/K1ABC`, `K1ABC/P`) trigger automatic Type-2 + Type-3 message alternation. The encoder automatically handles G4JNT normalisation (prepends a space if character 1 is a letter, e.g. `G4JNT` → `[sp]G4JNT`).
+- **Maidenhead Locator** — 4-character grid square (e.g. `GF05`) or 6-character sub-square (e.g. `GF05ab`). A 6-character locator triggers automatic Type-1 + Type-3 message alternation, conveying sub-square precision to receiving stations. Both formats are fully supported.
+- **TX Power (dBm)** — Transmit power level. Must be one of the 19 valid WSPR levels: 0, 3, 7, 10, 13, 17, 20, 23, 27, 30, 33, 37, 40, 43, 47, 50, 53, 57, 60 dBm. Values outside this set are silently rounded to the nearest valid entry by the encoder.
+- **XTAL Calibration (ppb)** — Crystal frequency correction in parts-per-billion. A positive value means the crystal runs fast (the firmware lowers the effective frequency to compensate). This value is applied immediately to all oscillator frequency calculations.
 
 ---
 
@@ -403,7 +415,7 @@ The **Wi-Fi Network** card handles connectivity:
 
 - **Scan button** — Triggers a blocking Wi-Fi channel scan (≈2 s) and populates a dropdown list of discovered access points with their SSID, signal strength (RSSI), and security type. Clicking an entry fills the SSID field automatically.
 - **Password** — WPA/WPA2 passphrase (show/hide toggle included).
-- **NTP Server** — Hostname or IP of the NTP server (default: `pool.ntp.org`). Used only in NTP time-sync mode.
+- **NTP Server** — Hostname or IP of the NTP server (default: `pool.ntp.org`). Used only in NTP time-sync mode; changes are applied immediately without a reboot.
 - **No credentials hint** — If the SSID field is left blank, the ESP32 starts in soft-AP mode at `192.168.4.1`. This is useful for initial configuration without a known network.
 
 If STA connection fails, the firmware falls back to AP mode and starts a background reconnect timer (5-minute interval) so the device will reconnect automatically when the home network becomes available again.
@@ -458,11 +470,11 @@ All other bands use identical dial frequencies worldwide. Always verify that the
 The **Frequency Hopping** card enables automatic band rotation:
 
 - **Enable hopping toggle** — When enabled, the transmitter advances to the next enabled band after each hop interval expires.
-- **Interval (seconds)** — Minimum 120 seconds (one full WSPR transmission slot). Setting a shorter interval is silently clamped to 120 s.
+- **Interval (seconds)** — Minimum 120 seconds (one full WSPR transmission slot). Values shorter than 120 s stored in NVS are clamped to 120 s by `config_load()`.
 
 Example: with 40 m, 20 m, and 15 m enabled and a 240-second hop interval, the sequence is: 40 m → 20 m → 15 m → 40 m → … , with one transmission every 240 s per band.
 
-Hopping requires at least 2 enabled bands to be meaningful. The current band is always visible in the status panel.
+Hopping requires at least 2 enabled bands to be meaningful. If no band is enabled, the firmware falls back to 40 m automatically. The current band is always visible in the status panel.
 
 ---
 
@@ -476,7 +488,7 @@ The **TX Duty Cycle** card controls what fraction of available 2-minute WSPR slo
 - **20%** — WSPR community standard; transmits approximately 1 in every 5 slots
 - **100%** — Transmit every available slot
 
-The firmware uses a random number generator to decide independently for each slot whether to transmit, so the long-term average approaches the configured percentage without creating fixed patterns.
+The firmware uses a deterministic accumulator (not a random number generator) to decide for each slot whether to transmit. The long-term average precisely equals the configured percentage without creating random jitter.
 
 ---
 
@@ -490,7 +502,7 @@ The live **Status panel** (updated every 2 seconds) shows:
 
 | Field | Description |
 |---|---|
-| **RF Hardware** | Detected oscillator (Si5351A, AD9850, or None/DUMMY) |
+| **RF Hardware** | Detected oscillator (Si5351A, AD9850 (assumed), or None/DUMMY) |
 | **Time synchronization** | UTC time or "Not synchronized" |
 | **Current band** | Active WSPR band name |
 | **Frequency** | Exact dial frequency in kHz |
@@ -564,6 +576,8 @@ The web server exposes the following endpoints:
 }
 ```
 
+When `CONFIG_WSPR_HTTP_AUTH_ENABLE` is set, all endpoints require an `Authorization: Basic <base64>` header. The browser will show its native credential prompt on first access.
+
 <div align="right">
   <a href="#readme-top">
     <img src="images/backtotop.png" alt="backtotop" width="30" height="30">
@@ -578,9 +592,9 @@ The web server exposes the following endpoints:
 
 | Parameter | Default | Notes |
 |---|---|---|
-| Callsign | `CONFIG_WSPR_DEFAULT_CALLSIGN` | Set in menuconfig |
-| Locator | `CONFIG_WSPR_DEFAULT_LOCATOR` | 4-char, set in menuconfig |
-| Power | `CONFIG_WSPR_DEFAULT_POWER_DBM` | Set in menuconfig |
+| Callsign | `CONFIG_WSPR_DEFAULT_CALLSIGN` | Set in menuconfig (default: `N0CALL`) |
+| Locator | `CONFIG_WSPR_DEFAULT_LOCATOR` | 4- or 6-char, set in menuconfig (default: `AA00`) |
+| Power | `CONFIG_WSPR_DEFAULT_POWER_DBM` | Set in menuconfig (default: 23 dBm) |
 | NTP server | `pool.ntp.org` | — |
 | Bands enabled | 40 m, 20 m | — |
 | TX enabled | `false` | Must be manually enabled after first boot |
@@ -618,7 +632,7 @@ idf.py menuconfig
 
 ### Configure (menuconfig)
 
-Run `idf.py menuconfig` and navigate to **WSPR Transmitter Configuration** to set all parameters (see [Menuconfig Options](#menuconfig-options-kconfig) below). At minimum, set your callsign, locator, and GPIO pin assignments for your hardware.
+Run `idf.py menuconfig` and navigate to **WSPR Transmitter** to set all parameters (see [Menuconfig Options](#menuconfig-options-kconfig) below). At minimum, set your callsign, locator, and GPIO pin assignments for your hardware.
 
 ### Build
 
@@ -655,15 +669,15 @@ The default ESP-IDF partition table includes a `nvs` partition large enough for 
 
 ## Menuconfig Options (Kconfig)
 
-All build-time parameters are exposed through `Kconfig.projbuild` under the menu **"WSPR Transmitter Configuration"**.
+All build-time parameters are exposed through `Kconfig.projbuild` under the menu **"WSPR Transmitter"**.
 
 ### Station defaults
 
-| Option | Symbol | Description |
-|---|---|---|
-| Default callsign | `CONFIG_WSPR_DEFAULT_CALLSIGN` | Compiled-in default; overridden by NVS |
-| Default locator | `CONFIG_WSPR_DEFAULT_LOCATOR` | 4-char Maidenhead; overridden by NVS |
-| Default power (dBm) | `CONFIG_WSPR_DEFAULT_POWER_DBM` | Integer; overridden by NVS |
+| Option | Symbol | Default | Description |
+|---|---|---|---|
+| Default callsign | `CONFIG_WSPR_DEFAULT_CALLSIGN` | `N0CALL` | Compiled-in default; overridden by NVS |
+| Default locator | `CONFIG_WSPR_DEFAULT_LOCATOR` | `AA00` | 4- or 6-char Maidenhead; overridden by NVS |
+| Default power (dBm) | `CONFIG_WSPR_DEFAULT_POWER_DBM` | `23` | Integer 0–60; overridden by NVS |
 
 ### Oscillator — Si5351A
 
@@ -673,7 +687,7 @@ All build-time parameters are exposed through `Kconfig.projbuild` under the menu
 | SDA GPIO | `CONFIG_SI5351_SDA_GPIO` | 21 |
 | SCL GPIO | `CONFIG_SI5351_SCL_GPIO` | 22 |
 | Crystal frequency (Hz) | `CONFIG_SI5351_XTAL_FREQ` | 25000000 |
-| Output drive current | `CONFIG_SI5351_DRIVE_*MA` | 8 mA |
+| Output drive current | `CONFIG_SI5351_DRIVE_2MA` … `CONFIG_SI5351_DRIVE_8MA` | 8 mA |
 
 ### Oscillator — AD9850
 
@@ -685,6 +699,12 @@ All build-time parameters are exposed through `Kconfig.projbuild` under the menu
 | RESET GPIO | `CONFIG_AD9850_RESET_GPIO` | 5 |
 | Reference clock (Hz) | `CONFIG_AD9850_REF_CLOCK` | 125000000 |
 
+### Oscillator detection
+
+| Option | Symbol | Default | Description |
+|---|---|---|---|
+| Assume AD9850 present | `CONFIG_OSCILLATOR_ASSUME_AD9850` | `y` | When enabled, treats AD9850 as present if Si5351 probe fails. Disable to enter DUMMY mode instead. |
+
 ### Low-pass filter GPIO
 
 | Option | Symbol | Default |
@@ -695,11 +715,17 @@ All build-time parameters are exposed through `Kconfig.projbuild` under the menu
 
 A `static_assert` in `gpio_filter.c` enforces that no two filter GPIOs share the same pin number.
 
+### LPF relay settle time
+
+| Option | Symbol | Default | Description |
+|---|---|---|---|
+| Settle time (ms) | `CONFIG_WSPR_LPF_SETTLE_MS` | 10 | Delay after GPIO write before enabling RF output. Range: 5–100 ms. |
+
 ### Wi-Fi access point (fallback mode)
 
 | Option | Symbol | Default |
 |---|---|---|
-| AP SSID | `CONFIG_WSPR_AP_SSID` | `ESP32_WSPR` |
+| AP SSID | `CONFIG_WSPR_AP_SSID` | `WSPR-Config` |
 | AP password | `CONFIG_WSPR_AP_PASS` | (empty = open) |
 
 ### Time synchronisation
@@ -711,12 +737,21 @@ A `static_assert` in `gpio_filter.c` enforces that no two filter GPIOs share the
 
 #### GPS-specific options (if GPS mode selected)
 
-| Option | Symbol | Default |
-|---|---|---|
-| UART port | `CONFIG_GPS_UART_PORT` | 2 |
-| RX GPIO | `CONFIG_GPS_RX_GPIO` | 16 |
-| TX GPIO | `CONFIG_GPS_TX_GPIO` | 17 |
-| Baud rate | `CONFIG_GPS_BAUD_RATE` | 9600 |
+| Option | Symbol | Default | Description |
+|---|---|---|---|
+| UART port | `CONFIG_GPS_UART_PORT` | 1 | ESP32 UART peripheral index |
+| RX GPIO | `CONFIG_GPS_RX_GPIO` | 16 | GPIO receiving NMEA from GPS TX |
+| TX GPIO | `CONFIG_GPS_TX_GPIO` | 17 | GPIO transmitting to GPS RX |
+| Baud rate | `CONFIG_GPS_BAUD_RATE` | 9600 | Most GPS modules default to 9600 |
+| PPS GPIO | `CONFIG_GPS_PPS_GPIO` | -1 | Set to a valid GPIO for PPS support; -1 to disable |
+
+### HTTP Basic Authentication
+
+| Option | Symbol | Default | Description |
+|---|---|---|---|
+| Enable auth | `CONFIG_WSPR_HTTP_AUTH_ENABLE` | `n` | Require username/password for all HTTP endpoints |
+| Username | `CONFIG_WSPR_HTTP_AUTH_USER` | `admin` | Used only when auth is enabled |
+| Password | `CONFIG_WSPR_HTTP_AUTH_PASS` | `wspr` | Used only when auth is enabled |
 
 ### Web UI language
 
@@ -724,6 +759,13 @@ A `static_assert` in `gpio_filter.c` enforces that no two filter GPIOs share the
 |---|---|
 | English | `CONFIG_WEBUI_LANG_EN` |
 | Spanish | `CONFIG_WEBUI_LANG_ES` |
+
+### Debugging options
+
+| Option | Symbol | Default | Description |
+|---|---|---|---|
+| Task watchdog | `CONFIG_WSPR_TASK_WDT_ENABLE` | `n` | Register scheduler task with IDF task watchdog. Requires WDT timeout ≥ 2 s in sdkconfig. |
+| Symbol overrun log | `CONFIG_WSPR_SYMBOL_OVERRUN_LOG` | `y` | Emit ESP_LOGW if a symbol is programmed >10 ms after its deadline. |
 
 <div align="right">
   <a href="#readme-top">
@@ -750,7 +792,7 @@ The firmware drives a 3-bit binary address bus (GPIO_A = bit 0, GPIO_B = bit 1, 
 | 6 | 1 | 1 | 0 | 15 m, 12 m |
 | 7 | 1 | 1 | 1 | 10 m |
 
-After `gpio_filter_select()` is called, the firmware inserts a **10 ms `vTaskDelay()`** before enabling the oscillator output to allow relay contacts to physically settle. This prevents key-clicks and out-of-band emissions during the relay transition.
+After `gpio_filter_select()` is called, the firmware inserts a delay (`CONFIG_WSPR_LPF_SETTLE_MS`, default 10 ms) before enabling the oscillator output to allow relay contacts to physically settle. This prevents key-clicks and out-of-band emissions during the relay transition. The settle time is configurable in menuconfig.
 
 You can modify the `BAND_FILTER[]` table freely to match your physical LPF hardware layout without touching any other code.
 
@@ -792,21 +834,21 @@ The **Si5351A** is a highly versatile I2C-programmable clock generator manufactu
 
 The Si5351A consists of a reference oscillator (25 or 27 MHz crystal), two PLLs (PLLA and PLLB) that multiply the crystal to 600–900 MHz, and up to 3 MultiSynth output dividers (CLK0–CLK2). This firmware uses only CLK0 locked to PLLA.
 
-The PLL multiplier `a` is computed as `900 MHz / f_xtal_MHz` (rounded to give VCO ≥ 600 MHz), and the output divider is computed as `VCO_Hz / f_out_Hz` with a fractional numerator/denominator pair (p2, p3) that provides the milli-Hz frequency resolution required for WSPR symbol spacing.
+The PLL multiplier `a` is computed as `875 MHz / f_xtal_MHz` (giving a VCO near 875 MHz), and the output divider is computed as `VCO_Hz / f_out_Hz` with a fractional numerator/denominator pair (p2, p3) that provides the milli-Hz frequency resolution required for WSPR symbol spacing. An optional `R` post-divider is applied automatically for output frequencies below 500 kHz (2200 m and 630 m bands).
 
-The `R` post-divider is applied for output frequencies below 500 kHz (2200 m and 630 m bands).
+A **band cache** (`si5351_band_cache_t`) pre-computes all divider chain coefficients once per carrier frequency change. Within a WSPR window (162 symbols) only the six PLL numerator registers are rewritten per symbol (~1 I2C transaction per 683 ms), minimising bus traffic and latency.
 
 ### AD9850 DDS
 
-The **AD9850** is a Direct Digital Synthesizer (DDS) IC from Analog Devices, operating with a 125 MHz reference clock. It uses a 32-bit frequency tuning word (FTW) to set the output frequency: `FTW = f_out × 2^32 / f_ref`. The firmware computes this in integer arithmetic using a pre-scaled constant `AD9850_SCALE_KHZ = 2^32 / (f_ref / 1000)` to avoid 64-bit overflow.
+The **AD9850** is a Direct Digital Synthesizer (DDS) IC from Analog Devices, operating with a 125 MHz reference clock. It uses a 32-bit frequency tuning word (FTW) to set the output frequency: `FTW = f_out × 2^32 / f_ref`. The firmware computes this in 32-bit integer arithmetic using pre-scaled constants to avoid 64-bit overflow at runtime.
 
-Because the AD9850 bus is write-only (no readback), the firmware cannot detect its presence and **always assumes it is present** after the Si5351 probe fails. The output is a 10-bit DAC reconstructed sine wave, much lower amplitude than the Si5351 square wave (~1 V p-p into 50 Ω). An external power amplifier is highly recommended with the AD9850.
+Because the AD9850 bus is write-only (no readback), the firmware cannot detect its presence and **always assumes it is present** after the Si5351 probe fails (when `CONFIG_OSCILLATOR_ASSUME_AD9850` is enabled). The output is a 10-bit DAC reconstructed sine wave (~1 V p-p into 50 Ω). An external power amplifier is highly recommended with the AD9850.
 
 The AD9850 bit-bang transfer is protected by a FreeRTOS `portMUX` critical section to prevent interruption by the second ESP32 core mid-transfer.
 
 ### Dummy mode
 
-If neither oscillator is found (Si5351 I2C probe fails, AD9850 GPIO init fails), the firmware enters **dummy mode**: all `oscillator_*` calls return `ESP_OK` silently, and the web UI displays a warning. This allows the rest of the firmware (Wi-Fi, WebUI, time sync) to continue operating for debugging purposes.
+If neither oscillator is found (Si5351 I2C probe fails and `CONFIG_OSCILLATOR_ASSUME_AD9850` is disabled), the firmware enters **dummy mode**: all `oscillator_*` calls return `ESP_OK` silently, and the web UI displays a warning. This allows the rest of the firmware (Wi-Fi, WebUI, time sync) to continue operating for debugging purposes.
 
 ---
 
@@ -818,15 +860,24 @@ Accurate UTC time is **essential** for WSPR. Transmissions that start more than 
 
 Uses the ESP-IDF SNTP client (`esp_sntp`) to periodically query an NTP server. The SNTP callback sets `_synced = true` and the firmware's `scheduler_task` unblocks. Typical accuracy: 1–50 ms, which is more than sufficient for WSPR.
 
-The NTP server hostname is configurable per-instance from the web UI (default: `pool.ntp.org`). Changes are saved to NVS and applied at next boot.
+The NTP server hostname is configurable per-instance from the web UI (default: `pool.ntp.org`). Changes are applied immediately via `time_sync_restart_ntp()` without a device reboot.
 
 ### GPS mode (`CONFIG_WSPR_TIME_GPS`)
 
-A background FreeRTOS task reads NMEA-0183 sentences from a UART-connected GPS module. It accepts `$GPRMC` and `$GNRMC` sentences (most GPS modules output at least one of these). Each sentence is validated with a full NMEA XOR checksum before parsing. The `TZ` environment variable is forced to `"UTC0"` before any `mktime()` call to prevent local timezone offset being applied to NMEA UTC timestamps.
+A background FreeRTOS task (`gps_task`, 6 kB stack, priority 5) reads NMEA-0183 sentences from a UART-connected GPS module. The firmware accepts all four sentence types:
 
-Typical accuracy: ±1 s (limited by the 1 Hz NMEA sentence rate and UART latency). For higher accuracy, a PPS (pulse-per-second) input could be added in a future revision.
+- `$GPRMC` / `$GNRMC` — single and multi-constellation RMC sentences (date + time + validity flag)
+- `$GPZDA` / `$GNZDA` — single and multi-constellation ZDA sentences (date + time, 4-digit year)
 
-GPS mode is independent of Wi-Fi, making it suitable for portable or remote beacon installations without internet access.
+Each sentence is validated with a full NMEA XOR checksum before parsing. The `TZ` environment variable is forced to `"UTC0"` before any `mktime()` call to prevent local timezone offset being applied to NMEA UTC timestamps.
+
+Typical accuracy: ±1 s (limited by the 1 Hz NMEA sentence rate and UART latency).
+
+#### GPS PPS support
+
+When `CONFIG_GPS_PPS_GPIO` is set to a valid GPIO number (≥ 0), a rising-edge ISR (`pps_isr`) fires on each PPS pulse and zeroes the sub-second component of the wall clock. This reduces timing uncertainty from ~10 ms (UART latency) down to a few microseconds. The NMEA sentence still provides the correct UTC second value; PPS only improves sub-second accuracy. Set `CONFIG_GPS_PPS_GPIO = -1` (the default) to disable PPS.
+
+GPS mode is fully independent of Wi-Fi, making it suitable for portable or remote beacon installations without internet access.
 
 <div align="right">
   <a href="#readme-top">
@@ -848,7 +899,7 @@ If a Wi-Fi SSID is configured, the firmware attempts to associate with the acces
 ### AP fallback mode
 
 If no SSID is configured, or if all STA connection attempts fail, the firmware starts a soft access point:
-- SSID: `CONFIG_WSPR_AP_SSID` (default `ESP32_WSPR`)
+- SSID: `CONFIG_WSPR_AP_SSID` (default `WSPR-Config`)
 - Password: `CONFIG_WSPR_AP_PASS` (if ≥ 8 characters, uses WPA2-PSK; otherwise open network)
 - IP: `192.168.4.1`
 - Up to 4 simultaneous clients
@@ -859,7 +910,7 @@ When in AP-only mode with saved STA credentials, a periodic `esp_timer` fires ev
 
 ### Wi-Fi scan
 
-The `GET /api/wifi_scan` endpoint triggers a blocking scan (~2 s) that returns a JSON array of nearby access points with SSID, RSSI, and security type. In AP-only mode, the scan temporarily elevates to APSTA mode, waits 150 ms for the STA interface to initialise, scans, then returns to AP mode. Results are capped at 20 entries for HTTP payload efficiency.
+The `GET /api/wifi_scan` endpoint triggers a blocking scan (~2 s) that returns a JSON array of nearby access points with SSID, RSSI, and security type. In AP-only mode, the scan temporarily elevates to APSTA mode, waits **300 ms** for the STA interface to initialise, scans, then returns to AP mode. Results are capped at 20 entries for HTTP payload efficiency. Hidden networks (empty SSID) are filtered out. A FreeRTOS mutex prevents concurrent scan calls.
 
 <div align="right">
   <a href="#readme-top">
@@ -871,13 +922,13 @@ The `GET /api/wifi_scan` endpoint triggers a blocking scan (~2 s) that returns a
 
 ## WSPR Band Frequencies & IARU Regions
 
-The firmware stores dial frequencies for all 12 bands and all 3 IARU regions in the table `BAND_FREQ_HZ[3][BAND_COUNT]` in `config.c`. The inline function `config_band_freq_hz(region, band)` selects the correct entry.
+The firmware stores dial frequencies for all 12 bands and all 3 IARU regions in the table `BAND_FREQ_HZ[3][BAND_COUNT]` in `config.c`. The inline function `config_band_freq_hz(region, band)` selects the correct entry with bounds-checked array access.
 
 All frequencies are **dial frequencies** in Hz. The actual transmitted RF frequency is `dial_freq + 1500 Hz + symbol_offset` for each symbol.
 
 ### Full frequency table
 
-| Band | Region 1 (EU/Africa) | Region 2 (Americas) | Region 3 (Asia/Pacific) |
+| Band | Region 1 (EU/Africa/ME) | Region 2 (Americas) | Region 3 (Asia/Pacific) |
 |---|---|---|---|
 | 2200 m | 137,600 Hz | 137,600 Hz | 137,600 Hz |
 | 630 m | 475,700 Hz | 475,700 Hz | 475,700 Hz |
@@ -892,11 +943,11 @@ All frequencies are **dial frequencies** in Hz. The actual transmitted RF freque
 | 12 m | 24,926,100 Hz | 24,926,100 Hz | 24,926,100 Hz |
 | 10 m | 28,126,100 Hz | 28,126,100 Hz | 28,126,100 Hz |
 
-**60 m note:** The 60 m WSPR frequency differs between IARU regions due to different national channelisation plans. Region 2 (Americas) uses 5,346.5 kHz per FCC/ARRL coordination. Region 3 uses 5,367.0 kHz per WIA/JARL coordination. Region 1 uses 5,288.6 kHz. Always verify that operation on 60 m is permitted under your national amateur radio licence.
+**60 m note:** The 60 m WSPR frequency differs between IARU regions due to different national channelisation plans. Region 1 (Europe) uses 5,288.6 kHz. Region 2 (Americas) uses 5,346.5 kHz per FCC/ARRL coordination. Region 3 uses 5,367.0 kHz per WIA/JARL coordination. Always verify that operation on 60 m is permitted under your national amateur radio licence.
 
 ### Selecting your IARU region
 
-Set the region in the **IARU Region** card of the web UI. The selection is saved to NVS. The `iaru_region` field in `wspr_config_t` stores values 1, 2, or 3; an invalid stored value is automatically corrected to 1 at boot.
+Set the region in the **IARU Region** card of the web UI. The selection is saved to NVS. The `iaru_region` field in `wspr_config_t` stores values 1, 2, or 3; an invalid stored value is automatically corrected to 1 at boot by `config_load()`.
 
 <div align="right">
   <a href="#readme-top">
@@ -911,12 +962,13 @@ Set the region in the **IARU Region** card of the web UI. The selection is saved
 When `hop_enabled = true`, the `scheduler_task` rotates through the list of enabled bands after each `hop_interval_sec` seconds. The hop state (current band index, time-on-band counter) is maintained in task-local variables and resets on each firmware boot.
 
 **Hop logic:**
-1. After a transmission completes, check if `time_on_band >= hop_interval_sec`.
+1. After a transmission completes, check if `time_elapsed >= hop_interval_sec`.
 2. If yes, advance the band index to the next enabled band (wrapping around).
 3. Call `gpio_filter_select(BAND_FILTER[new_band])`.
 4. Update the status cache with the new band name.
+5. If the band changes while pre-armed, immediately re-program the oscillator and filter for the new band.
 
-If only one band is enabled, hopping is effectively disabled (the single band is always "the next" band). The minimum hop interval is enforced in the UI hint as 120 seconds (one TX slot), though the firmware does not hard-clamp values shorter than this.
+If only one band is enabled, hopping is effectively disabled (the single band is always "the next" band). If no bands are enabled, the firmware automatically falls back to 40 m. The minimum hop interval is 120 s per the protocol; values shorter than this stored in NVS are clamped at load time.
 
 ---
 
@@ -924,10 +976,10 @@ If only one band is enabled, hopping is effectively disabled (the single band is
 
 The WSPR protocol recommends that stations transmit no more than 20% of the time, leaving the other 80% for receiving. This is both a good operating practice and a courtesy to other users who may be listening on the same frequency.
 
-The firmware implements duty cycle as a random slot gate: before each 2-minute slot, a random number in [0, 99] is drawn; if it is less than `tx_duty_pct`, the slot is used for transmission. Otherwise, the slot is skipped and the scheduler waits for the next one.
+The firmware implements duty cycle as a **deterministic accumulator**: before each 2-minute slot, `accumulator += tx_duty_pct`. When the accumulator reaches or exceeds 100, the slot is used for transmission and 100 is subtracted. This produces a perfectly even distribution without randomness.
 
 - `tx_duty_pct = 0`: Never transmit.
-- `tx_duty_pct = 20`: Transmit ~20% of slots (WSPR standard).
+- `tx_duty_pct = 20`: Transmit 1 in 5 slots — the WSPR community standard.
 - `tx_duty_pct = 100`: Transmit every slot.
 
 ---
@@ -940,24 +992,19 @@ The `xtal_cal_ppb` field stores the calibration offset in **parts per billion (p
 
 ### How calibration is applied
 
-**Si5351A:** The ppb correction is applied to the internal VCO frequency before computing the MS0 output divider:
-```
-vco_cal = vco_nominal + (vco_nominal / 1e9) * cal_ppb
-```
-A positive `cal_ppb` means the crystal is fast (output frequency would be too high), so the effective VCO is lowered.
+**Si5351A:** The ppb correction is applied to the internal VCO target frequency before computing the MS0 output divider. A positive `cal_ppb` means the crystal is fast (output frequency would be too high), so the effective VCO is lowered. Applying the calibration invalidates the band cache, so the next `oscillator_set_freq()` recomputes the divider chain.
 
-**AD9850:** The ppb correction scales the target frequency before computing the 32-bit tuning word:
-```
-freq_cal = freq_nominal * (1 - cal_ppb / 1e9)
-```
+**AD9850:** The ppb correction scales the pre-computed frequency-to-tuning-word constants before computing each frequency word.
+
+In both cases, if a calibration update arrives during a WSPR transmission window, it is **deferred** and applied by `oscillator_tx_end()` after the final symbol to prevent mid-transmission frequency glitches.
 
 ### How to measure your crystal offset
 
 1. Set `xtal_cal_ppb = 0` in the WebUI.
 2. Transmit on a well-calibrated band (e.g. 40 m or 20 m).
 3. Use a calibrated SDR receiver to measure the actual centre frequency of your signal.
-4. Compute: `cal_ppb = (measured_Hz - nominal_Hz) * 1e9 / nominal_Hz`
-5. If your signal is 50 Hz high on 14,097,100 Hz: `cal_ppb = 50 * 1e9 / 14097100 ≈ 3547 ppb`
+4. Compute: `cal_ppb = (measured_Hz - nominal_Hz) × 1e9 / nominal_Hz`
+5. If your signal is 50 Hz high on 14,097,100 Hz: `cal_ppb = 50 × 1e9 / 14097100 ≈ 3547 ppb`
 6. Enter a **negative** value to lower the output (the crystal is running fast).
 7. Save and verify on the next transmission.
 
@@ -975,27 +1022,36 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 
 | Feature | Status |
 |---|---|
-| WSPR Type-1, 2 and 3 encoder (callsign + locator + power) | ✅ Complete |
+| WSPR Type-1 encoder (callsign + locator + power) | ✅ Complete |
+| WSPR Type-2 encoder (compound callsign with '/') | ✅ Complete |
+| WSPR Type-3 encoder (6-char locator companion) | ✅ Complete |
+| Type-1/Type-3 alternation (6-char locator) | ✅ Complete |
+| Type-2/Type-3 alternation (compound callsign) | ✅ Complete |
 | Si5351A oscillator driver (I2C, auto-detect) | ✅ Complete |
 | AD9850 DDS oscillator driver (GPIO bit-bang) | ✅ Complete |
 | Oscillator dummy mode (no hardware) | ✅ Complete |
 | 3-bit GPIO LPF bank driver | ✅ Complete |
 | NTP time synchronisation (SNTP) | ✅ Complete |
-| GPS time synchronisation (NMEA UART) | ✅ Complete |
+| GPS time synchronisation (NMEA UART, $GPRMC/$GNRMC/$GPZDA/$GNZDA) | ✅ Complete |
+| GPS PPS sub-second accuracy (rising-edge ISR) | ✅ Complete |
 | Wi-Fi STA mode | ✅ Complete |
 | Wi-Fi AP fallback (192.168.4.1) | ✅ Complete |
 | Background Wi-Fi reconnect timer | ✅ Complete |
-| NVS persistent configuration | ✅ Complete |
+| NVS persistent configuration (schema v5) | ✅ Complete |
 | Embedded SPA web interface | ✅ Complete |
 | REST API (config, status, tx_toggle, reset, scan) | ✅ Complete |
+| HTTP Basic Authentication | ✅ Complete |
 | IARU Region selection for 60 m | ✅ Complete |
 | 12-band support (2200 m – 10 m) | ✅ Complete |
 | Frequency hopping | ✅ Complete |
-| TX duty cycle | ✅ Complete |
-| Crystal calibration (ppb) | ✅ Complete |
+| TX duty cycle (deterministic accumulator) | ✅ Complete |
+| Crystal calibration (ppb), deferred during TX | ✅ Complete |
+| Pre-arming oscillator at phase=0 | ✅ Complete |
 | English and Spanish WebUI | ✅ Complete |
 | WSPRnet spot link | ✅ Complete |
 | Reboot info (boot time, reset cause) in status | ✅ Complete |
+| Task watchdog integration | ✅ Complete |
+| Symbol timing overrun logging | ✅ Complete |
 
 <div align="right">
   <a href="#readme-top">
@@ -1009,9 +1065,8 @@ Alternatively, WSPRnet reception reports include the frequency offset in Hz meas
 
 Planned features and improvements for future releases:
 
-- [ ] **RTC DS3231** — for non connected fail mode
+- [ ] **RTC DS3231** — offline timekeeping when Wi-Fi and GPS are unavailable
 - [ ] **OTA firmware update** — over-the-air firmware upgrade from the WebUI
-- [ ] **GPS PPS input** — sub-millisecond time accuracy using PPS signal
 - [ ] **Power amplifier enable GPIO** — switch a PA on/off around transmissions
 - [ ] **Transmission schedule** — time-of-day or band/day-of-week scheduling rules
 - [ ] **MQTT telemetry** — publish status to an MQTT broker for remote monitoring
@@ -1044,7 +1099,7 @@ If you have a suggestion that would make this better, please fork the repo and c
 
 - C99, ESP-IDF coding conventions.
 - All new modules must have a corresponding `module.h` with Doxygen-style API documentation (see `gpio_filter.h`, `oscillator.h` for examples).
-- No floating-point nor 64bits arithmetic.
+- No floating-point nor 64-bit arithmetic.
 - New Kconfig options must be documented in this README.
 
 <div align="right">
@@ -1096,6 +1151,7 @@ Project Link: [https://github.com/hiperiondev/ESP32\_WSPR](https://github.com/hi
 - **Wikipedia** — WSPR (amateur radio software). [en.wikipedia.org/wiki/WSPR](https://en.wikipedia.org/wiki/WSPR_(amateur_radio_software))
 - **Scott Harden (AJ4VD)** — WSPR protocol notes with Markdown rendering of the G4JNT paper. [swharden.com](https://swharden.com/software/FSKview/wspr/)
 - **WSPR frequency list** — Official WSPRnet frequency coordination. [wsprnet.org/drupal/node/218](https://www.wsprnet.org/drupal/node/218)
+- **Wsprry Pi documentation** — Concise WSPR specification summary. [wsprry-pi.readthedocs.io](https://wsprry-pi.readthedocs.io/en/latest/About_WSPR/)
 
 ### Oscillator hardware
 
@@ -1119,6 +1175,7 @@ Project Link: [https://github.com/hiperiondev/ESP32\_WSPR](https://github.com/hi
 - **ESP-IDF HTTP Server**. [docs.espressif.com](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/protocols/esp_http_server.html)
 - **ESP-IDF Wi-Fi Driver**. [docs.espressif.com](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/network/esp_wifi.html)
 - **ESP-IDF NVS Flash**. [docs.espressif.com](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/storage/nvs_flash.html)
+- **ESP-IDF I2C Master Driver**. [docs.espressif.com](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/i2c.html)
 
 ---
 

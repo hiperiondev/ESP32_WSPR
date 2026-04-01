@@ -1,6 +1,9 @@
 /**
  * @file time_sync.h
  * @brief UTC time synchronisation subsystem — NTP or GPS, selected at build time.
+ * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This module abstracts two hardware-independent time sources behind a single
@@ -56,10 +59,6 @@
  * All other functions are safe to call from any task concurrently:
  * they read the @c volatile @c _synced flag and delegate to @c gettimeofday()
  * which is reentrant on ESP-IDF.
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #pragma once

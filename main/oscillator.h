@@ -69,6 +69,7 @@
  * internally mutex-protected.
  *
  * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
  * @par License
  * GNU General Public License v3 or later — see COPYING.
  */

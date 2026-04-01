@@ -1,6 +1,9 @@
 /**
  * @file version.h
  * @brief Firmware version constants and version-string helper macros.
+ * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This header defines the three-component semantic version number of the
@@ -29,10 +32,6 @@
  * @endcode
  * The macro expands at compile time to a string literal such as @c "1.0.0".
  * No runtime overhead is incurred.
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #ifndef VERSION_H_

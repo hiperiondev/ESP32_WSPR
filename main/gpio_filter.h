@@ -1,6 +1,9 @@
 /**
  * @file gpio_filter.h
  * @brief 3-bit GPIO low-pass filter bank driver.
+ * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This module drives three ESP32 output-only GPIO pins that together form a
@@ -57,10 +60,6 @@
  * Both functions are safe to call from any FreeRTOS task or from an ISR
  * context.  @ref gpio_filter_select() calls only @c gpio_set_level(), which
  * is documented as ISR-safe by the ESP-IDF GPIO driver.
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #pragma once

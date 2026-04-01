@@ -1,6 +1,9 @@
 /**
  * @file wifi_manager.h
  * @brief Wi-Fi connection manager with STA mode and soft-AP fallback.
+ * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This module manages the ESP32 Wi-Fi subsystem for the WSPR transmitter.
@@ -49,10 +52,6 @@
  * which runs in the ESP-IDF event-loop task; they are safe to call from any
  * task after startup completes.  @ref wifi_manager_scan() is safe to call from
  * any task but performs a blocking scan of approximately 2 seconds.
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #pragma once

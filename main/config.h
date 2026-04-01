@@ -1,6 +1,9 @@
 /**
  * @file config.h
  * @brief Persistent configuration subsystem for the ESP32 WSPR transmitter.
+ * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This module owns the single authoritative @ref wspr_config_t structure that
@@ -43,10 +46,6 @@
  * takes its own mutex.  In @c main.c all access to the live @c g_cfg instance
  * is serialised through the web-server config mutex (@ref web_server_cfg_lock()
  * / @ref web_server_cfg_unlock()).
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #pragma once

@@ -1,6 +1,9 @@
 /**
  * @file web_server.h
  * @brief Embedded HTTP configuration and status server.
+ * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This module runs a lightweight single-task HTTP server built on the ESP-IDF
@@ -58,10 +61,6 @@
  * The HTML page is rendered using the string constants from @c webui_strings.h,
  * which selects the appropriate language header (@c webui_en.h or @c webui_es.h)
  * at compile time via the @c CONFIG_WEBUI_LANG_* Kconfig choice.
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #pragma once

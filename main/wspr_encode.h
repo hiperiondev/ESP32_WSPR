@@ -1,6 +1,9 @@
 /**
  * @file wspr_encode.h
  * @brief WSPR message encoder — Type-1, Type-2, and Type-3 messages.
+ * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
+ * @see https://github.com/hiperiondev/ESP32_WSPR
+ * @license GNU General Public License v3.0
  *
  * @details
  * This module encodes WSPR (Weak Signal Propagation Reporter) messages into
@@ -58,10 +61,6 @@
  * @par Thread safety
  * All functions are stateless (no global mutable state); they are safe to call
  * from any task.
- *
- * @copyright 2026 Emiliano Augusto Gonzalez (egonzalez.hiperion@gmail.com)
- * @par License
- * GNU General Public License v3 or later — see COPYING.
  */
 
 #pragma once
