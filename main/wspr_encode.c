@@ -642,11 +642,11 @@ static int pack_callsign_type2(const char *cs, int power_dbm, uint32_t *n_call_o
     if (pack_callsign_type1(base_call, &n_call) < 0)
         return -1;
 
-    // Force power code odd — Type-2/3 indicator for WSPR decoders
+    // force pwr_code (already = dBm + 64) to odd directly,
+    // preserving the +64 base offset required by the WSPR spec.
     uint32_t pwr_code = 0;
     pack_power(power_dbm, &pwr_code);
-    int rounded_dbm = (int)(pwr_code)-64;
-    uint32_t n_pwr = (uint32_t)((rounded_dbm / 2) * 2 + 1); // force odd
+    uint32_t n_pwr = (pwr_code % 2u == 0u) ? (pwr_code + 1u) : pwr_code;
 
     uint32_t n_loc = 0;
     if (has_prefix) {
@@ -953,11 +953,11 @@ int wspr_encode_type3(const char *callsign, const char *locator, int power_dbm, 
     // this Type-3 message to the preceding Type-1 or Type-2 from the same station
     uint32_t n_loc = callsign_hash15(callsign);
 
-    // Power code is forced odd — same Type-2/3 identifier mechanism as Type-2
+    // Force pwr_code (already = dBm + 64) to odd directly,
+    // preserving the +64 base offset required by the WSPR spec.
     uint32_t pwr_code = 0;
     pack_power(power_dbm, &pwr_code);
-    int rounded_dbm = (int)pwr_code - 64;
-    uint32_t n_pwr = (uint32_t)((rounded_dbm / 2) * 2 + 1); // force odd
+    uint32_t n_pwr = (pwr_code % 2u == 0u) ? (pwr_code + 1u) : pwr_code;
 
     uint8_t msg[7];
     pack_message(n_call, n_loc, n_pwr, msg);
