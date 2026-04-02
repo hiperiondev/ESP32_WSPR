@@ -488,7 +488,7 @@ La tarjeta **Ciclo de trabajo TX** controla qué fracción de los slots WSPR de 
 - **20%** — Estándar de la comunidad WSPR; transmite aproximadamente 1 de cada 5 slots
 - **100%** — Transmitir en cada slot disponible
 
-El firmware usa un **acumulador determinista** (no un generador de números aleatorios) para decidir cada slot si transmitir. El promedio a largo plazo iguala precisamente el porcentaje configurado sin generar variabilidad aleatoria.
+El firmware usa un **acumulador determinista** (no un generador de números aleatorios) para decidir si debe transmitir en cada slot. El promedio a largo plazo iguala precisamente el porcentaje configurado sin generar variabilidad aleatoria.
 
 ---
 
