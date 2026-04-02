@@ -34,7 +34,7 @@
 11. [Hardware oscilador](#hardware-oscilador)
 12. [Sincronización horaria](#sincronización-horaria)
 13. [Wi-Fi y red](#wi-fi-y-red)
-14. [Frecuencias de banda WSPR y regiones UAIRO](#frecuencias-de-banda-wspr-y-regiones-uairo)
+14. [Frecuencias de banda WSPR y regiones IARU](#frecuencias-de-banda-wspr-y-regiones-iaru)
 15. [Modo de salto de frecuencia](#modo-de-salto-de-frecuencia)
 16. [Ciclo de trabajo TX](#ciclo-de-trabajo-tx)
 17. [Calibración de cristal](#calibración-de-cristal)
@@ -51,7 +51,7 @@
 
 **WSPR Transmitter** es un firmware completo y autónomo de beacon WSPR (Weak Signal Propagation Reporter) construido sobre el framework **ESP-IDF** de Espressif para la familia de microcontroladores ESP32. A diferencia de la mayoría de los proyectos WSPR para aficionados que dependen del ecosistema Arduino, este firmware está escrito en C puro sobre las APIs nativas de ESP-IDF, dándole acceso a la gestión de tareas FreeRTOS, el cliente SNTP nativo, la pila `esp_wifi`, almacenamiento persistente `nvs_flash` y el servidor web `esp_http_server` — todo sin la sobrecarga de la capa de abstracción Arduino.
 
-El proyecto está diseñado para ser apto para operación desatendida como beacon: codifica mensajes WSPR Tipo 1, 2 y 3 completamente en el chip, controla un oscilador RF (Si5351A o AD9850) con resolución sub-Hz por símbolo, selecciona automáticamente el filtro de paso bajo correcto mediante un bus GPIO de 3 bits, sincroniza la hora vía NTP o GPS (con PPS opcional), y expone una aplicación web de página única responsiva para configuración y monitoreo. Todos los ajustes del usuario persisten en la partición flash NVS (almacenamiento no volátil) del ESP32 y sobreviven a cortes de energía.
+El proyecto está diseñado para ser apto para operación desatendida como beacon: codifica mensajes WSPR Tipo 1, 2 y 3 completamente en el chip, controla un oscilador RF (Si5351A o AD9850) con resolución sub-Hz por símbolo, selecciona automáticamente el filtro de paso bajo correcto mediante un bus GPIO de 3 bits, sincroniza la hora vía GPS (autodetectado al arrancar) o NTP (fallback), y expone una aplicación web de página única responsiva para configuración y monitoreo. Todos los ajustes del usuario persisten en la partición flash NVS (almacenamiento no volátil) del ESP32 y sobreviven a cortes de energía.
 
 El modo WSPR ocupa aproximadamente 6 Hz de ancho de banda RF y puede decodificarse con relaciones señal/ruido tan bajas como −28 dB en un ancho de banda de referencia de 2,5 kHz, lo que lo hace extremadamente útil para estudios de propagación usando niveles de potencia muy bajos. Una vez transmitidos, los reportes de recepción de estaciones WSPR automatizadas en todo el mundo se cargan automáticamente a [WSPRnet](https://www.wsprnet.org), donde una interfaz de mapas permite ver exactamente hasta dónde llegó la señal.
 
@@ -97,7 +97,8 @@ Entrada: indicativo + localizador + potencia_dBm
         │
         ▼
 1. Empaquetar indicativo → entero de 28 bits (fórmula estándar G4JNT)
-   - Rellenar a 6 chars; anteponer espacio si char[1] es una letra
+   - Rellenar a 6 chars; anteponer espacio si la posición 2 (0-indexado, 3er carácter)
+     no es un dígito — p.ej. "G4JNT" → " G4JNT"
    - Chars 0-1: alfabeto de 37 símbolos (0-9=0..9, A-Z=10..35, espacio=36)
    - Char 2:    solo dígito (0-9)
    - Chars 3-5: alfabeto sufijo de 27 símbolos (A-Z=0..25, espacio=26)
@@ -144,11 +145,11 @@ Salida: 162 símbolos 4-FSK (valores 0, 1, 2, 3)
 
 ### Temporización
 
-Las transmisiones WSPR **deben** comenzar al inicio de un minuto UTC par (00:00, 00:02, 00:04, …). El planificador calcula el tiempo restante hasta el próximo límite de minuto par usando `ahora % 120` y entra en una espera de precisión en los últimos dos segundos para alinear el primer símbolo con pocos milisegundos del límite. El firmware se niega a transmitir hasta que la sincronización de tiempo (NTP o GPS) haya ocurrido, garantizando que el reloj del sistema sea válido.
+Las transmisiones WSPR **deben** comenzar al inicio de un minuto UTC par (00:00, 00:02, 00:04, …). El planificador calcula el tiempo restante hasta el próximo límite de minuto par usando `phase = ahora % 120` y entra en un bucle de alineación precisa en los últimos dos segundos para alinear el primer símbolo con pocos milisegundos del límite. El firmware se niega a transmitir hasta que la sincronización de tiempo (NTP o GPS) haya ocurrido, garantizando que el reloj del sistema sea válido.
 
 ### Ciclo de trabajo
 
-El estándar de la comunidad WSPR recomienda transmitir en no más del 20% de los slots de 2 minutos disponibles, dejando el resto para recepción. Este firmware implementa un porcentaje de ciclo de trabajo configurable (0–100%) usando un acumulador determinista: `acumulador += ciclo_pct` cada slot; se usa un slot cuando el acumulador alcanza o supera 100, momento en que se resta 100. Esto produce una distribución perfectamente uniforme de slots de transmisión sin aleatoriedad.
+El estándar de la comunidad WSPR recomienda transmitir en no más del 20% de los slots de 2 minutos disponibles, dejando el resto para recepción. Este firmware implementa un porcentaje de ciclo de trabajo configurable (0–100%) usando un **acumulador determinista**: `acumulador += ciclo_pct` antes de cada slot; se usa un slot cuando el acumulador alcanza o supera 100, momento en que se resta 100. Esto produce una distribución perfectamente uniforme de slots de transmisión sin aleatoriedad.
 
 <div align="right">
   <a href="#readme-top">
@@ -163,19 +164,23 @@ El estándar de la comunidad WSPR recomienda transmitir en no más del 20% de lo
 - ✅ **Codificador WSPR Tipo 1, 2 y 3 completo** — empaquetado de indicativo, codificación convolucional (K=32, tasa 1/2), intercalado por inversión de bits, superposición del vector de sincronía; aritmética solo entera
 - ✅ **Soporte de oscilador dual** — Si5351A (I2C, autodetectado) y AD9850 (bit-bang GPIO, asumido presente); modo ficticio elegante si ninguno es encontrado
 - ✅ **12 bandas WSPR** — de 2200 m a 10 m (137 kHz a 28 MHz)
-- ✅ **Selección de región UAIRO/IARU** — Región 1, 2 o 3 para la frecuencia de marcación correcta en 60 m
+- ✅ **Selección de región IARU** — Región 1, 2 o 3 para la frecuencia de marcación correcta en 60 m
 - ✅ **Selección automática de filtro de paso bajo** — bus GPIO BCD de 3 bits, 8 posiciones de filtro, retardo de establecimiento de relé configurable
-- ✅ **Sincronía de tiempo vía NTP** (SNTP, servidor seleccionable) o **GPS** (NMEA-0183 $GPRMC/$GNRMC/$GPZDA/$GNZDA por UART, con PPS opcional)
+- ✅ **Sincronía de tiempo vía GPS auto-detectado** (NMEA-0183 $GPRMC/$GNRMC/$GPZDA/$GNZDA por UART, con PPS opcional) o **NTP fallback** (SNTP, servidor seleccionable)
+- ✅ **Soporte GPS PPS** — ISR de flanco ascendente pone a cero el componente sub-segundo del reloj para precisión de µs
 - ✅ **Modo STA Wi-Fi** con fallback a AP suave (192.168.4.1) y temporizador de reconexión en segundo plano
 - ✅ **Salto de frecuencia** — rotación automática por las bandas habilitadas cada N segundos (mín. 120 s = 1 slot TX)
 - ✅ **Ciclo de trabajo TX** — 0–100% configurable con selección de slot por acumulador determinista
-- ✅ **Calibración de cristal** — corrección ±ppb almacenada en NVS, aplicada a todos los cálculos de frecuencia
+- ✅ **Calibración de cristal** — corrección ±ppb almacenada en NVS, aplicada a todos los cálculos de frecuencia; diferida durante ventanas TX activas
+- ✅ **Pre-armado del oscilador** — el LPF y la frecuencia del oscilador se programan en el segundo :00 (un segundo antes de TX) para minimizar la latencia del primer símbolo
 - ✅ **Aplicación web de página única embebida** — sin SPIFFS, sin archivos externos; completamente autocontenido
 - ✅ **API REST** — endpoints JSON para lectura/escritura de configuración, sondeo de estado, escaneo Wi-Fi, alternancia TX, reinicio del sistema
+- ✅ **Autenticación HTTP Básica** — protección opcional por usuario/contraseña para todos los endpoints web
 - ✅ **Configuración persistente NVS** — todos los ajustes sobreviven cortes de energía; verificación de versión de esquema con defaults automáticos ante discrepancia
 - ✅ **UI multilingüe** — inglés y español (selección en tiempo de compilación vía Kconfig)
-- ✅ **Autenticación HTTP Básica** — protección opcional por usuario/contraseña para la interfaz web
 - ✅ **Integración WSPRnet** — enlace directo desde la WebUI al mapa de spots de la estación
+- ✅ **Soporte watchdog de tarea** — registro opcional de la tarea del planificador con el watchdog de tarea ESP-IDF
+- ✅ **Log de sobrecarga de temporización de símbolos** — advertencia configurable cuando se supera el deadline de un símbolo por >10 ms
 - ✅ **Nativo ESP-IDF** — sin dependencia de Arduino
 
 <div align="right">
@@ -239,7 +244,7 @@ OUT1               ──── Entrada LPF (salida de onda sinusoidal)
 ```
 
 - Reloj de referencia: 125 MHz (módulos AD9850 más comunes)
-- Interfaz: serial bit-bang (MSB primero, palabra de frecuencia de 32 bits + control de 8 bits)
+- Interfaz: serial bit-bang (**LSB primero**, palabra de frecuencia de 32 bits + control de 8 bits)
 - Palabra de sintonización de frecuencia: `FTW = freq_Hz × 2^32 / ref_clk_Hz`
 - Salida: onda sinusoidal, ~1 V pico a pico en 50 Ω (mucho menor que el Si5351)
 
@@ -280,7 +285,7 @@ main/
 ├── config.c / config.h     — Struct de config persistente, carga/guardado/defaults NVS, tablas de bandas
 ├── oscillator.c / .h       — API unificada de oscilador; drivers Si5351A + AD9850; autodetección
 ├── gpio_filter.c / .h      — Driver de banco LPF GPIO de 3 bits
-├── time_sync.c / .h        — Abstracción de sincronía NTP (SNTP) y GPS (NMEA UART + PPS opcional)
+├── time_sync.c / .h        — Autodetección GPS + NMEA UART (PPS opcional); NTP (SNTP) fallback
 ├── wifi_manager.c / .h     — Wi-Fi STA + fallback AP; reconexión en segundo plano; escaneo Wi-Fi
 ├── web_server.c / .h       — Servidor HTTP; API REST; caché de estado; mutex de configuración
 ├── wspr_encode.c / .h      — Codificador WSPR Tipo 1/2/3 completo (solo enteros)
@@ -302,7 +307,7 @@ app_main()
   │    gpio_filter_init()
   │    oscillator_init() → oscillator_set_cal()
   │    wifi_manager_start()
-  │    time_sync_init()
+  │    time_sync_init()        ← sondeo GPS; fallback a NTP si no detectado
   │    web_server_start()
   │
   ├─ xTaskCreate(status_task,    pila=6144, prioridad=3)
@@ -317,7 +322,7 @@ app_main()
 ### Secuencia de transmisión WSPR (`wspr_transmit()`)
 
 ```
-1. Bloquear mutex de config; capturar indicativo, localizador, potencia, región, paridad
+1. Bloquear mutex de config; capturar indicativo, localizador, potencia, región, paridad; desbloquear
 2. Determinar tipo de mensaje (wspr_encode_type)
 3. Codificar 162 símbolos:
      - Tipo 1 o Tipo 2 (paridad=0): wspr_encode()
@@ -329,13 +334,13 @@ app_main()
 5. oscillator_tx_begin()
 6. oscillator_enable(true)
 7. Para cada uno de los 162 símbolos:
-     a. oscillator_set_freq_mhz(base_hz, símbolo × 1464844 mHz)
+     a. oscillator_set_freq_mhz(base_hz, símbolo × (375000/256) mHz)
      b. Espera activa hasta el deadline del símbolo (temporizador con precisión de µs)
 8. oscillator_enable(false)
 9. oscillator_tx_end()
 ```
 
-> **Nota:** Los pasos 4a–4c también se ejecutan especulativamente en `phase=0` (segundo 0 del límite de minuto par) para minimizar la latencia entre el límite y el primer símbolo. El estado de pre-armado se rastrea en `g_pre_armed`.
+> **Nota:** Los pasos 4a–4c también se ejecutan especulativamente en `phase=0` (segundo :00 del límite de minuto par) para minimizar la latencia entre el límite y el primer símbolo. El estado de pre-armado se rastrea en `g_pre_armed`.
 
 ### Estructura de configuración (`wspr_config_t`)
 
@@ -349,14 +354,14 @@ typedef struct {
     uint8_t  power_dbm;             // Potencia TX en dBm (niveles válidos WSPR)
     char     wifi_ssid[33];         // SSID Wi-Fi
     char     wifi_pass[65];         // Contraseña Wi-Fi
-    char     ntp_server[64];        // Nombre de host o IP del servidor NTP
     bool     band_enabled[12];      // Un flag por cada banda WSPR
     bool     hop_enabled;           // Habilitar salto de frecuencia automático
-    uint32_t hop_interval_sec;      // Intervalo de salto en segundos (mín. 120)
+    uint32_t hop_interval_sec;      // Intervalo de salto en segundos (mín. 120, forzado por config_load)
+    char     ntp_server[64];        // Nombre de host o IP del servidor NTP
     bool     tx_enabled;            // Habilitación/deshabilitación maestra de TX
     uint8_t  tx_duty_pct;           // Ciclo de trabajo TX (0-100 %)
     int32_t  xtal_cal_ppb;          // Desplazamiento de calibración del cristal en ppb
-    uint8_t  iaru_region;           // Región UAIRO: 1, 2 o 3
+    uint8_t  iaru_region;           // Región IARU: 1, 2 o 3
     bool     bands_changed;         // Flag en tiempo de ejecución: la lista de bandas necesita reconstrucción (no se guarda en NVS)
     uint8_t  tx_slot_parity;        // Contador de alternancia Tipo 2/3 (no se guarda en NVS)
 } wspr_config_t;
@@ -400,10 +405,10 @@ La página principal está dividida en varias tarjetas de configuración, un pan
 
 La tarjeta **Estación** configura el contenido del mensaje WSPR:
 
-- **Indicativo** — Tu indicativo de radioaficionado. Los indicativos simples (p. ej. `W1AW`, `LU3VEA`, `G4JNT`) usan hasta 6 caracteres alfanuméricos con un dígito en la posición 2. Los indicativos compuestos que contienen una barra (p. ej. `PJ4/K1ABC`, `K1ABC/P`) activan la alternancia automática de mensajes Tipo 2 + Tipo 3. El codificador maneja automáticamente la normalización G4JNT (antepone un espacio si el carácter 1 es una letra, p. ej. `G4JNT` → `[esp]G4JNT`).
-- **Localizador Maidenhead** — Cuadrícula de 4 caracteres (p. ej. `GF05`) o sub-cuadrícula de 6 caracteres (p. ej. `GF05ab`). Un localizador de 6 caracteres activa la alternancia automática de mensajes Tipo 1 + Tipo 3, transmitiendo la precisión de sub-cuadrícula a las estaciones receptoras. Ambos formatos son totalmente compatibles.
+- **Indicativo** — Tu indicativo de radioaficionado. Los indicativos simples (p. ej. `W1AW`, `LU3VEA`, `G4JNT`) usan hasta 6 caracteres alfanuméricos con un dígito en la posición 2 (indexada desde 0, es decir el tercer carácter). El codificador aplica automáticamente la regla de normalización G4JNT: si la posición 2 no es un dígito, se antepone un espacio — p.ej. `G4JNT` → `[esp]G4JNT`. Los indicativos compuestos que contienen una barra (p. ej. `PJ4/K1ABC`, `K1ABC/P`) activan la alternancia automática de mensajes Tipo 2 + Tipo 3.
+- **Localizador Maidenhead** — Cuadrícula de 4 caracteres (p. ej. `GF05`) **o** sub-cuadrícula de 6 caracteres (p. ej. `GF05ab`). Un localizador de 6 caracteres activa la alternancia automática de mensajes Tipo 1 + Tipo 3, transmitiendo la precisión de sub-cuadrícula a las estaciones receptoras. Ambos formatos son totalmente compatibles.
 - **Potencia TX (dBm)** — Nivel de potencia de transmisión. Debe ser uno de los 19 niveles WSPR válidos: 0, 3, 7, 10, 13, 17, 20, 23, 27, 30, 33, 37, 40, 43, 47, 50, 53, 57, 60 dBm. Los valores fuera de este conjunto se redondean silenciosamente al nivel válido más cercano por el codificador.
-- **Calibración XTAL (ppb)** — Corrección de frecuencia del cristal en partes por mil millones. Un valor positivo significa que el cristal funciona rápido (el firmware baja la frecuencia efectiva para compensar). Este valor se aplica inmediatamente a todos los cálculos de frecuencia del oscilador.
+- **Calibración XTAL (ppb)** — Corrección de frecuencia del cristal en partes por mil millones. Un valor positivo significa que el cristal funciona rápido (el firmware baja la frecuencia efectiva para compensar). Este valor se aplica a todos los cálculos de frecuencia del oscilador; se difiere durante una ventana TX activa para evitar saltos de frecuencia a mitad de símbolo.
 
 ---
 
@@ -415,7 +420,7 @@ La tarjeta **Red Wi-Fi** maneja la conectividad:
 
 - **Botón de escaneo** — Lanza un escaneo de canales Wi-Fi bloqueante (≈2 s) y popula una lista desplegable de puntos de acceso descubiertos con su SSID, potencia de señal (RSSI) y tipo de seguridad. Al hacer clic en una entrada se rellena automáticamente el campo SSID.
 - **Contraseña** — Frase de acceso WPA/WPA2 (incluye interruptor mostrar/ocultar).
-- **Servidor NTP** — Nombre de host o IP del servidor NTP (predeterminado: `pool.ntp.org`). Usado solo en modo de sincronía NTP; los cambios se aplican inmediatamente vía `time_sync_restart_ntp()` sin necesidad de reiniciar.
+- **Servidor NTP** — Nombre de host o IP del servidor NTP (predeterminado: `pool.ntp.org`). Usado solo cuando no se detecta GPS al arrancar. Los cambios se aplican inmediatamente vía `time_sync_restart_ntp()` sin necesidad de reiniciar.
 - **Indicación sin credenciales** — Si el campo SSID se deja en blanco, el ESP32 arranca en modo AP suave en `192.168.4.1`. Esto es útil para la configuración inicial sin una red conocida.
 
 Si la conexión STA falla, el firmware cae al modo AP y arranca un temporizador de reconexión en segundo plano (intervalo de 5 minutos) para que el dispositivo se reconecte automáticamente cuando la red doméstica vuelva a estar disponible.
@@ -434,7 +439,7 @@ La tarjeta **Bandas activas** presenta una casilla de verificación para cada un
 | 630 m | 475,700 kHz |
 | 160 m | 1.838,100 kHz |
 | 80 m | 3.570,100 kHz |
-| 60 m | Dependiente de la región (ver tarjeta Región UAIRO/IARU) |
+| 60 m | Dependiente de la región (ver tarjeta Región IARU) |
 | 40 m | 7.040,100 kHz |
 | 30 m | 10.140,200 kHz |
 | 20 m | 14.097,100 kHz |
@@ -443,15 +448,15 @@ La tarjeta **Bandas activas** presenta una casilla de verificación para cada un
 | 12 m | 24.926,100 kHz |
 | 10 m | 28.126,100 kHz |
 
-Se pueden habilitar múltiples bandas simultáneamente. Cuando el salto de frecuencia está activo, el firmware recorre todas las bandas habilitadas en orden. Cuando el salto está deshabilitado, el firmware transmite solo en la primera banda habilitada.
+Se pueden habilitar múltiples bandas simultáneamente. Cuando el salto de frecuencia está activo, el firmware recorre todas las bandas habilitadas en orden. Cuando el salto está deshabilitado, el firmware transmite solo en la primera banda habilitada. Si no hay ninguna banda habilitada, el planificador cae automáticamente a 40 m.
 
 ---
 
-#### Tarjeta de Región UAIRO/IARU
+#### Tarjeta de Región IARU
 
-![WebUI UAIRO](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/webui_iaru.jpg)
+![WebUI IARU](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/webui_iaru.jpg)
 
-La tarjeta **Región UAIRO/IARU y frecuencia en 60 m** selecciona la región administrativa ITU/UAIRO/IARU. Esto afecta únicamente la frecuencia de marcación en la banda de 60 m, que difiere entre regiones debido a las asignaciones nacionales de espectro:
+La tarjeta **Región IARU y frecuencia en 60 m** selecciona la región administrativa ITU/IARU. Esto afecta únicamente la frecuencia de marcación en la banda de 60 m, que difiere entre regiones debido a las asignaciones nacionales de espectro:
 
 | Región | Cobertura | Frecuencia de marcación WSPR en 60 m |
 |---|---|---|
@@ -474,8 +479,6 @@ La tarjeta **Salto de frecuencia** habilita la rotación automática de bandas:
 
 Ejemplo: con 40 m, 20 m y 15 m habilitados y un intervalo de salto de 240 segundos, la secuencia es: 40 m → 20 m → 15 m → 40 m → … , con una transmisión cada 240 s por banda.
 
-El salto requiere al menos 2 bandas habilitadas para ser significativo. Si no hay ninguna banda habilitada, el firmware cae automáticamente a 40 m. La banda actual siempre es visible en el panel de estado.
-
 ---
 
 #### Tarjeta de Ciclo de Trabajo TX
@@ -488,7 +491,7 @@ La tarjeta **Ciclo de trabajo TX** controla qué fracción de los slots WSPR de 
 - **20%** — Estándar de la comunidad WSPR; transmite aproximadamente 1 de cada 5 slots
 - **100%** — Transmitir en cada slot disponible
 
-El firmware usa un **acumulador determinista** (no un generador de números aleatorios) para decidir si debe transmitir en cada slot. El promedio a largo plazo iguala precisamente el porcentaje configurado sin generar variabilidad aleatoria.
+El firmware usa un **acumulador determinista** (no un generador de números aleatorios) para decidir si debe transmitir en cada slot. `acumulador += ciclo_pct` antes de cada slot; se transmite cuando el acumulador alcanza o supera 100, momento en que se resta 100. El promedio a largo plazo iguala precisamente el porcentaje configurado.
 
 ---
 
@@ -496,20 +499,20 @@ El firmware usa un **acumulador determinista** (no un generador de números alea
 
 ![WebUI Estado](https://github.com/hiperiondev/ESP32_WSPR/raw/main/images/webui_status.jpg)
 
-La tarjeta **Control TX** contiene un único botón de alternancia (**Activar TX** / **Detener TX**) que habilita o deshabilita la transmisión inmediatamente. Esto equivale a cambiar `tx_enabled` en la configuración y se guarda en NVS.
+La tarjeta **Control TX** contiene un único botón de alternancia (**Activar TX** / **Detener TX**) que habilita o deshabilita la transmisión inmediatamente.
 
 El **panel de estado** en vivo (actualizado cada 2 segundos) muestra:
 
 | Campo | Descripción |
 |---|---|
 | **Hardware RF** | Oscilador detectado (Si5351A, AD9850 (asumido), o Ninguno/DUMMY) |
-| **Sincronización horaria** | Hora UTC o "Sin sincronizar" |
+| **Sincronización horaria** | Hora UTC o "Sin sincronizar"; la fuente es GPS o NTP |
 | **Banda actual** | Nombre de la banda WSPR activa |
-| **Frecuencia** | Frecuencia de marcación exacta en kHz |
+| **Frecuencia** | Frecuencia de marcación exacta + 1500 Hz offset de audio |
 | **Próxima TX** | Cuenta regresiva en segundos al próximo slot de transmisión |
 | **TX activa** | Si una transmisión está actualmente en progreso |
 | **Símbolo** | Índice del símbolo actual (0–161) durante la transmisión |
-| **Hora de inicio** | Marca de tiempo UTC del último reinicio |
+| **Hora de inicio** | Marca de tiempo UTC del último reinicio (fijada tras la primera sincronía) |
 | **Causa de reset** | Razón hardware del último reinicio (Encendido, Watchdog, etc.) |
 
 Un enlace a **WSPRnet** al pie de la página abre directamente el mapa de spots de tu indicativo.
@@ -535,6 +538,8 @@ El servidor web expone los siguientes endpoints:
 | `GET` | `/api/status` | Devuelve una instantánea del estado en vivo como JSON |
 | `GET` | `/api/wifi_scan` | Lanza escaneo Wi-Fi; devuelve array JSON de APs |
 | `POST` | `/api/reset` | Programa `esp_restart()` |
+
+Cuando `CONFIG_WSPR_HTTP_AUTH_ENABLE` está activo, todos los endpoints requieren una cabecera `Authorization: Basic <base64>`. El navegador mostrará su diálogo nativo de credenciales en el primer acceso.
 
 #### Ejemplo: respuesta GET /api/status
 
@@ -576,8 +581,6 @@ El servidor web expone los siguientes endpoints:
 }
 ```
 
-Cuando `CONFIG_WSPR_HTTP_AUTH_ENABLE` está activo, todos los endpoints requieren una cabecera `Authorization: Basic <base64>`. El navegador mostrará su diálogo nativo de credenciales en el primer acceso.
-
 <div align="right">
   <a href="#readme-top">
     <img src="images/backtotop.png" alt="volver arriba" width="30" height="30">
@@ -592,9 +595,9 @@ Cuando `CONFIG_WSPR_HTTP_AUTH_ENABLE` está activo, todos los endpoints requiere
 
 | Parámetro | Predeterminado | Notas |
 |---|---|---|
-| Indicativo | `CONFIG_WSPR_DEFAULT_CALLSIGN` | Configurado en menuconfig (predeterminado: `N0CALL`) |
-| Localizador | `CONFIG_WSPR_DEFAULT_LOCATOR` | 4 o 6 chars, en menuconfig (predeterminado: `AA00`) |
-| Potencia | `CONFIG_WSPR_DEFAULT_POWER_DBM` | En menuconfig (predeterminado: 23 dBm) |
+| Indicativo | `N0CALL` | Configurado en menuconfig (`CONFIG_WSPR_DEFAULT_CALLSIGN`) |
+| Localizador | `AA00` | 4 o 6 chars, en menuconfig (`CONFIG_WSPR_DEFAULT_LOCATOR`) |
+| Potencia | 23 dBm | En menuconfig (`CONFIG_WSPR_DEFAULT_POWER_DBM`) |
 | Servidor NTP | `pool.ntp.org` | — |
 | Bandas habilitadas | 40 m, 20 m | — |
 | TX habilitada | `false` | Debe habilitarse manualmente tras el primer arranque |
@@ -602,7 +605,7 @@ Cuando `CONFIG_WSPR_HTTP_AUTH_ENABLE` está activo, todos los endpoints requiere
 | Intervalo de salto | 120 s | — |
 | Ciclo de trabajo TX | 20% | Estándar WSPR |
 | Calibración XTAL | 0 ppb | Sin corrección |
-| Región UAIRO | 1 (Europa) | — |
+| Región IARU | 1 (Europa) | — |
 
 <div align="right">
   <a href="#readme-top">
@@ -728,22 +731,18 @@ Un `static_assert` en `gpio_filter.c` verifica que no haya dos GPIO de filtro qu
 | SSID del AP | `CONFIG_WSPR_AP_SSID` | `WSPR-Config` |
 | Contraseña del AP | `CONFIG_WSPR_AP_PASS` | (vacío = red abierta) |
 
-### Sincronización horaria
+### GPS (autodetección en tiempo de ejecución)
 
-| Opción | Símbolo | Descripción |
-|---|---|---|
-| Modo NTP | `CONFIG_WSPR_TIME_NTP` | Usar SNTP (requiere Wi-Fi) |
-| Modo GPS | `CONFIG_WSPR_TIME_GPS` | Usar receptor GPS NMEA por UART |
-
-#### Opciones específicas de GPS (si se selecciona modo GPS)
+El firmware sondea automáticamente el UART GPS configurado al arrancar. Si se recibe una sentencia NMEA válida con checksum correcto dentro del tiempo `CONFIG_GPS_DETECT_TIMEOUT_MS`, se activa el modo GPS. De lo contrario, se inicia el cliente SNTP como fallback NTP. No se requiere ni está disponible ninguna selección en tiempo de compilación entre GPS y NTP.
 
 | Opción | Símbolo | Predeterminado | Descripción |
 |---|---|---|---|
-| Puerto UART | `CONFIG_GPS_UART_PORT` | 1 | Índice de periférico UART del ESP32 |
-| GPIO RX | `CONFIG_GPS_RX_GPIO` | 16 | GPIO que recibe NMEA desde TX del GPS |
-| GPIO TX | `CONFIG_GPS_TX_GPIO` | 17 | GPIO que transmite al RX del GPS |
-| Velocidad en baudios | `CONFIG_GPS_BAUD_RATE` | 9600 | La mayoría de los módulos GPS usan 9600 por defecto |
-| GPIO PPS | `CONFIG_GPS_PPS_GPIO` | -1 | Poner a un GPIO válido para soporte PPS; -1 para deshabilitar |
+| Puerto UART GPS | `CONFIG_GPS_UART_PORT` | 1 | Índice de periférico UART del ESP32 |
+| GPIO RX GPS | `CONFIG_GPS_RX_GPIO` | 16 | GPIO que recibe NMEA desde el pin TX del GPS |
+| GPIO TX GPS | `CONFIG_GPS_TX_GPIO` | 17 | GPIO que transmite al pin RX del GPS |
+| Velocidad en baudios GPS | `CONFIG_GPS_BAUD_RATE` | 9600 | La mayoría de los módulos GPS usan 9600 por defecto |
+| GPIO PPS GPS | `CONFIG_GPS_PPS_GPIO` | -1 | ISR de flanco ascendente para precisión sub-segundo; -1 para deshabilitar |
+| Timeout de detección GPS (ms) | `CONFIG_GPS_DETECT_TIMEOUT_MS` | 3000 | Ventana de sondeo al arrancar (1000–10000 ms) |
 
 ### Autenticación HTTP Básica
 
@@ -792,13 +791,13 @@ El firmware controla un bus de dirección binaria de 3 bits (GPIO_A = bit 0, GPI
 | 6 | 1 | 1 | 0 | 15 m, 12 m |
 | 7 | 1 | 1 | 1 | 10 m |
 
-Tras llamar a `gpio_filter_select()`, el firmware inserta un retardo (`CONFIG_WSPR_LPF_SETTLE_MS`, predeterminado 10 ms) antes de habilitar la salida del oscilador para permitir que los contactos del relé se estabilicen físicamente. Esto previene clics de clave y emisiones fuera de banda durante la transición del relé. El tiempo de establecimiento es configurable en menuconfig.
+Tras llamar a `gpio_filter_select()`, el firmware inserta un retardo de `CONFIG_WSPR_LPF_SETTLE_MS` (predeterminado 10 ms) antes de habilitar la salida del oscilador para permitir que los contactos del relé se estabilicen físicamente. El tiempo de establecimiento es configurable en menuconfig.
 
 Puedes modificar libremente la tabla `BAND_FILTER[]` para adaptarla al diseño físico de tu hardware LPF sin tocar ningún otro código.
 
 ### Diseño de LPF recomendado
 
-Para cada filtro, diseña un **filtro de paso bajo en red T** (en lugar de una red Pi) para mejor eficiencia. QRP Labs, W3NQN y numerosas calculadoras LC en línea pueden generar valores de componentes para cada frecuencia de corte. Frecuencias de corte típicas:
+Para cada filtro, diseña un **filtro de paso bajo en red T** (en lugar de una red Pi) para mejor eficiencia. Frecuencias de corte típicas:
 
 | Filtro | Bandas | Frecuencia de corte |
 |---|---|---|
@@ -830,17 +829,19 @@ El **Si5351A** es un generador de reloj programable por I2C muy versátil fabric
 - Está disponible en placas breakout económicas de Adafruit, QRP Labs y numerosos proveedores.
 - La potencia de salida es adecuada para uso directo con antena con un LPF apropiado (~10 dBm = 10 mW).
 
-**Resumen de arquitectura (del datasheet del Si5351A):**
+**Resumen de arquitectura:**
 
 El Si5351A consiste en un oscilador de referencia (cristal de 25 o 27 MHz), dos PLLs (PLLA y PLLB) que multiplican el cristal a 600–900 MHz, y hasta 3 divisores de salida MultiSynth (CLK0–CLK2). Este firmware usa solo CLK0 bloqueado a PLLA.
 
-El multiplicador PLL `a` se calcula como `875 MHz / f_xtal_MHz` (dando un VCO cercano a 875 MHz), y el divisor de salida se calcula como `VCO_Hz / f_out_Hz` con un par numerador/denominador fraccional (p2, p3) que proporciona la resolución de frecuencia en mili-Hz requerida para el espaciado de símbolos WSPR. Un divisor `R` post-divisor se aplica automáticamente para frecuencias de salida por debajo de 500 kHz (bandas de 2200 m y 630 m).
+El multiplicador PLL entero `a` se calcula para apuntar a un VCO de aproximadamente **875 MHz** (punto medio del rango para mayor margen): `a = 875 / xtal_MHz`. El divisor de salida se calcula como `VCO_Hz / f_salida_Hz` con un par numerador/denominador fraccional (p2, p3 con p3 = 1 048 575) que proporciona la resolución de frecuencia en mili-Hz requerida para el espaciado de símbolos WSPR.
 
-Un **caché de banda** (`si5351_band_cache_t`) precomputa todos los coeficientes de la cadena divisora una vez por cada cambio de frecuencia portadora. Dentro de una ventana WSPR (162 símbolos) solo se reescriben los seis registros del numerador PLL por símbolo (~1 transacción I2C cada 683 ms), minimizando el tráfico del bus y la latencia.
+Un **caché de banda** (`si5351_band_cache_t`) precomputa todos los coeficientes de la cadena divisora una vez por cada cambio de frecuencia portadora. Dentro de una ventana WSPR (162 símbolos) solo se reescriben los seis registros del numerador PLL por símbolo (~1 transacción I2C cada 683 ms), minimizando el tráfico del bus y la latencia. Un divisor `R` post-divisor se aplica automáticamente para frecuencias de salida por debajo de 500 kHz (bandas de 2200 m y 630 m).
 
 ### AD9850 DDS
 
-El **AD9850** es un circuito integrado Sintetizador Digital Directo (DDS) de Analog Devices, que opera con un reloj de referencia de 125 MHz. Usa una palabra de sintonización de frecuencia (FTW) de 32 bits para establecer la frecuencia de salida: `FTW = f_salida × 2^32 / f_ref`. El firmware lo calcula en aritmética entera de 32 bits usando constantes preescaladas para evitar desbordamiento de 64 bits en tiempo de ejecución.
+El **AD9850** es un circuito integrado Sintetizador Digital Directo (DDS) de Analog Devices, que opera con un reloj de referencia de 125 MHz. Usa una palabra de sintonización de frecuencia (FTW) de 32 bits para establecer la frecuencia de salida: `FTW = f_salida × 2^32 / f_ref`. El firmware lo calcula en aritmética entera de 32 bits usando constantes preescaladas (`AD9850_FTW_PER_MHZ`, `AD9850_FTW_INT_PER_HZ`, etc.) para evitar desbordamiento de 64 bits en tiempo de ejecución.
+
+La interfaz serial transfiere 40 bits (32-bit FTW + 8-bit fase/control) **con el bit menos significativo primero (LSB-first)** en el pin D7/DATA, sincronizados por flancos ascendentes en W_CLK, luego capturados por un flanco ascendente en FQ_UD.
 
 Debido a que el bus del AD9850 es de solo escritura (sin lectura de retorno), el firmware no puede detectar su presencia y **siempre asume que está presente** tras el fallo del sondeo del Si5351 (cuando `CONFIG_OSCILLATOR_ASSUME_AD9850` está habilitado). La salida es una onda sinusoidal reconstruida por un DAC de 10 bits (~1 V p-p en 50 Ω). Se recomienda encarecidamente un amplificador de potencia externo con el AD9850.
 
@@ -854,20 +855,15 @@ Si no se encuentra ningún oscilador (el sondeo I2C del Si5351 falla y `CONFIG_O
 
 ## Sincronización horaria
 
-La hora UTC precisa es **esencial** para WSPR. Las transmisiones que comiencen con más de ±1–2 segundos del límite del minuto par no serán decodificadas. El firmware soporta dos fuentes de tiempo, seleccionadas en tiempo de compilación vía Kconfig.
+La hora UTC precisa es **esencial** para WSPR. Las transmisiones que comiencen con más de ±1–2 segundos del límite del minuto par no serán decodificadas. El firmware implementa **autodetección en tiempo de ejecución**: al arrancar sondea el UART GPS configurado durante `CONFIG_GPS_DETECT_TIMEOUT_MS` ms; si se detecta GPS, se activa el modo GPS; de lo contrario se inicia el cliente SNTP como fallback. No se requiere ninguna selección en tiempo de compilación.
 
-### Modo NTP (`CONFIG_WSPR_TIME_NTP`)
+### Modo GPS (autodetectado)
 
-Usa el cliente SNTP de ESP-IDF (`esp_sntp`) para consultar periódicamente un servidor NTP. El callback SNTP establece `_synced = true` y el `scheduler_task` del firmware se desbloquea. Precisión típica: 1–50 ms, más que suficiente para WSPR.
+Si se recibe una sentencia NMEA válida con checksum correcto en el UART GPS configurado dentro del tiempo de detección, se activa el modo GPS. Una tarea FreeRTOS permanente en segundo plano (`gps_task`, pila 6 kB, prioridad 5) lee sentencias NMEA-0183 y acepta cuatro tipos:
 
-El nombre de host del servidor NTP es configurable por instancia desde la WebUI (predeterminado: `pool.ntp.org`). Los cambios se aplican inmediatamente vía `time_sync_restart_ntp()` sin reinicio del dispositivo.
-
-### Modo GPS (`CONFIG_WSPR_TIME_GPS`)
-
-Una tarea FreeRTOS en segundo plano (`gps_task`, pila 6 kB, prioridad 5) lee sentencias NMEA-0183 de un módulo GPS conectado por UART. El firmware acepta los cuatro tipos de sentencias:
-
-- `$GPRMC` / `$GNRMC` — sentencias RMC de una y múltiples constelaciones (fecha + hora + flag de validez)
-- `$GPZDA` / `$GNZDA` — sentencias ZDA de una y múltiples constelaciones (fecha + hora, año de 4 dígitos)
+- `$GPRMC` / `$GNRMC` — sentencias RMC de una y múltiples constelaciones (fecha + hora + flag de validez + posición)
+- `$GPZDA` / `$GNZDA` — sentencias ZDA de una y múltiples constelaciones (fecha + hora con año de 4 dígitos)
+- `$GPGGA` / `$GNGGA` — sentencias GGA para extracción de posición (lat/lon para el botón "Desde GPS")
 
 Cada sentencia se valida con un checksum XOR NMEA completo antes de parsear. La variable de entorno `TZ` se fuerza a `"UTC0"` antes de cualquier llamada a `mktime()` para evitar que se aplique el desplazamiento de zona horaria local a las marcas de tiempo UTC de NMEA.
 
@@ -876,6 +872,12 @@ Precisión típica: ±1 s (limitada por la tasa de sentencias NMEA de 1 Hz y la 
 #### Soporte PPS GPS
 
 Cuando `CONFIG_GPS_PPS_GPIO` se establece a un número GPIO válido (≥ 0), una ISR de flanco ascendente (`pps_isr`) se activa en cada pulso PPS y pone a cero el componente sub-segundo del reloj del sistema. Esto reduce la incertidumbre de tiempo de ~10 ms (latencia UART) a unos pocos microsegundos. La sentencia NMEA sigue proporcionando el valor correcto del segundo UTC; PPS solo mejora la precisión sub-segundo. Establece `CONFIG_GPS_PPS_GPIO = -1` (el predeterminado) para deshabilitar PPS.
+
+### Modo NTP (fallback)
+
+Si no se detecta GPS, se inicia el cliente SNTP de ESP-IDF y consulta el servidor NTP configurado. El callback SNTP establece `_synced = true` y el `scheduler_task` se desbloquea. Precisión típica: 1–50 ms sobre un enlace Wi-Fi bueno, más que suficiente para WSPR.
+
+El nombre de host del servidor NTP es configurable por instancia desde la WebUI. Los cambios se aplican inmediatamente vía `time_sync_restart_ntp()` sin reiniciar el dispositivo.
 
 El modo GPS es completamente independiente de Wi-Fi, lo que lo hace adecuado para instalaciones de balizas portátiles o remotas sin acceso a internet.
 
@@ -892,7 +894,7 @@ El modo GPS es completamente independiente de Wi-Fi, lo que lo hace adecuado par
 ### Modo STA (estación)
 
 Si se configura un SSID Wi-Fi, el firmware intenta asociarse con el punto de acceso en modo STA. Se realizan hasta 5 reintentos de conexión dentro de una ventana de 15 segundos. En caso de éxito:
-- El firmware procede con la sincronía NTP (si está configurado)
+- El firmware procede con la sincronía NTP (si no se detectó GPS)
 - La interfaz web se vuelve accesible en la IP asignada por DHCP
 - La IP se muestra en el log de la consola serie y en `/api/status`
 
@@ -906,11 +908,11 @@ Si no se configura ningún SSID, o si todos los intentos de conexión STA fallan
 
 ### Reconexión en segundo plano
 
-Cuando está en modo solo AP con credenciales STA guardadas, un `esp_timer` periódico se activa cada **5 minutos** y reintenta la conexión STA (transiciona al modo APSTA, llama a `esp_wifi_connect()`). Esto permite que el beacon se recupere automáticamente cuando el router doméstico vuelve a estar en línea tras un corte de energía.
+Cuando está en modo solo AP con credenciales STA guardadas, un `esp_timer` periódico se activa cada **5 minutos** y reintenta la conexión STA (transiciona al modo APSTA, llama a `esp_wifi_connect()`). Esto permite que el beacon se recupere automáticamente cuando el router doméstico vuelve a estar en línea.
 
 ### Escaneo Wi-Fi
 
-El endpoint `GET /api/wifi_scan` lanza un escaneo bloqueante (~2 s) que devuelve un array JSON de puntos de acceso cercanos con SSID, RSSI y tipo de seguridad. En modo solo AP, el escaneo eleva temporalmente al modo APSTA, espera **300 ms** para que la interfaz STA se inicialice, escanea, y luego vuelve al modo AP. Los resultados se limitan a 20 entradas para eficiencia del payload HTTP. Las redes ocultas (SSID vacío) se filtran. Un mutex FreeRTOS previene llamadas de escaneo concurrentes.
+El endpoint `GET /api/wifi_scan` lanza un escaneo bloqueante (~2 s) que devuelve un array JSON de puntos de acceso cercanos con SSID, RSSI y tipo de seguridad. En modo solo AP, el escaneo eleva temporalmente al modo APSTA, espera **300 ms** para que la interfaz STA se inicialice, escanea, y luego vuelve al modo AP. Los resultados se limitan a 20 entradas; las redes ocultas (SSID vacío) se filtran. Un mutex FreeRTOS previene llamadas de escaneo concurrentes.
 
 <div align="right">
   <a href="#readme-top">
@@ -920,9 +922,9 @@ El endpoint `GET /api/wifi_scan` lanza un escaneo bloqueante (~2 s) que devuelve
 
 ---
 
-## Frecuencias de banda WSPR y regiones UAIRO/IARU
+## Frecuencias de banda WSPR y regiones IARU
 
-El firmware almacena las frecuencias de marcación para las 12 bandas y las 3 regiones UAIRO en la tabla `BAND_FREQ_HZ[3][BAND_COUNT]` en `config.c`. La función en línea `config_band_freq_hz(region, banda)` selecciona la entrada correcta con acceso a array verificado por límites.
+El firmware almacena las frecuencias de marcación para las 12 bandas y las 3 regiones IARU en la tabla `BAND_FREQ_HZ[3][BAND_COUNT]` en `config.c`. La función en línea `config_band_freq_hz(region, banda)` selecciona la entrada correcta con acceso a array verificado por límites.
 
 Todas las frecuencias son **frecuencias de marcación** en Hz. La frecuencia RF transmitida real es `freq_marcación + 1500 Hz + desplazamiento_símbolo` para cada símbolo.
 
@@ -943,11 +945,7 @@ Todas las frecuencias son **frecuencias de marcación** en Hz. La frecuencia RF 
 | 12 m | 24.926.100 Hz | 24.926.100 Hz | 24.926.100 Hz |
 | 10 m | 28.126.100 Hz | 28.126.100 Hz | 28.126.100 Hz |
 
-**Nota sobre los 60 m:** La frecuencia WSPR en 60 m difiere entre regiones UAIRO debido a los diferentes planes nacionales de canalización. La Región 1 (Europa) usa 5.288,6 kHz. La Región 2 (Américas) usa 5.346,5 kHz según la coordinación FCC/ARRL. La Región 3 usa 5.367,0 kHz según la coordinación WIA/JARL. Siempre verifica que la operación en 60 m esté permitida bajo tu licencia nacional de radioafición.
-
-### Selección de tu región UAIRO/IARU
-
-Establece la región en la tarjeta **Región IARU** de la WebUI. La selección se guarda en NVS. El campo `iaru_region` en `wspr_config_t` almacena valores 1, 2 o 3; cualquier valor almacenado inválido es automáticamente corregido a 1 al arrancar por `config_load()`.
+**Nota sobre los 60 m:** La Región 1 (Europa) usa 5.288,6 kHz. La Región 2 (Américas) usa 5.346,5 kHz según la coordinación FCC/ARRL. La Región 3 usa 5.367,0 kHz según la coordinación WIA/JARL. Siempre verifica que la operación en 60 m esté permitida bajo tu licencia nacional de radioafición.
 
 <div align="right">
   <a href="#readme-top">
@@ -959,7 +957,7 @@ Establece la región en la tarjeta **Región IARU** de la WebUI. La selección s
 
 ## Modo de salto de frecuencia
 
-Cuando `hop_enabled = true`, el `scheduler_task` rota por la lista de bandas habilitadas después de cada `hop_interval_sec` segundos. El estado de salto (índice de banda actual, contador de tiempo en banda) se mantiene en variables locales a la tarea y se resetea en cada arranque del firmware.
+Cuando `hop_enabled = true`, el `scheduler_task` rota por la lista de bandas habilitadas después de cada `hop_interval_sec` segundos. El estado de salto se mantiene en variables locales a la tarea y se resetea en cada arranque del firmware.
 
 **Lógica de salto:**
 1. Tras completar una transmisión, verificar si `tiempo_transcurrido >= hop_interval_sec`.
@@ -968,15 +966,15 @@ Cuando `hop_enabled = true`, el `scheduler_task` rota por la lista de bandas hab
 4. Actualizar la caché de estado con el nuevo nombre de banda.
 5. Si la banda cambia mientras está pre-armado, reprogramar inmediatamente el oscilador y el filtro para la nueva banda.
 
-Si solo hay una banda habilitada, el salto queda efectivamente deshabilitado (la única banda siempre es "la siguiente"). Si no hay ninguna banda habilitada, el firmware cae automáticamente a 40 m. El intervalo mínimo de salto es 120 s según el protocolo; los valores menores almacenados en NVS se limitan en tiempo de carga.
+Si solo hay una banda habilitada, el salto queda efectivamente deshabilitado. Si no hay ninguna banda habilitada, el firmware cae automáticamente a 40 m. El intervalo mínimo de salto (120 s) se aplica forzosamente en `config_load()`.
 
 ---
 
 ## Ciclo de trabajo TX
 
-El protocolo WSPR recomienda que las estaciones transmitan no más del 20% del tiempo, dejando el otro 80% para recepción. Esto es tanto una buena práctica operativa como una cortesía para otros usuarios que puedan estar escuchando en la misma frecuencia.
+El protocolo WSPR recomienda que las estaciones transmitan no más del 20% del tiempo, dejando el otro 80% para recepción.
 
-El firmware implementa el ciclo de trabajo como un **acumulador determinista**: antes de cada slot de 2 minutos, `acumulador += tx_duty_pct`. Cuando el acumulador alcanza o supera 100, se usa el slot para transmisión y se resta 100. Esto produce una distribución perfectamente uniforme sin aleatoriedad.
+El firmware implementa el ciclo de trabajo usando un **acumulador determinista**: antes de cada slot de 2 minutos, `acumulador += tx_duty_pct`. Cuando el acumulador alcanza o supera 100, se usa el slot para transmisión y se resta 100. Esto produce una distribución perfectamente uniforme sin aleatoriedad.
 
 - `tx_duty_pct = 0`: Nunca transmitir.
 - `tx_duty_pct = 20`: Transmitir 1 de cada 5 slots — el estándar de la comunidad WSPR.
@@ -986,17 +984,17 @@ El firmware implementa el ciclo de trabajo como un **acumulador determinista**: 
 
 ## Calibración de cristal
 
-Incluso los cristales de alta calidad se desvían de su frecuencia nominal por decenas a cientos de partes por millón. Para WSPR, la frecuencia de transmisión debe estar dentro de ±200 Hz de la frecuencia de marcación (la ventana del receptor es de solo unos ±100 Hz), por lo que la calibración es importante.
+Incluso los cristales de alta calidad se desvían de su frecuencia nominal. Para WSPR, la frecuencia de transmisión debe estar dentro de ±200 Hz de la frecuencia de marcación (la ventana del receptor es de solo unos ±100 Hz), por lo que la calibración es importante.
 
 El campo `xtal_cal_ppb` almacena el desplazamiento de calibración en **partes por mil millones (ppb)**.
 
 ### Cómo se aplica la calibración
 
-**Si5351A:** La corrección en ppb se aplica a la frecuencia objetivo interna del VCO antes de calcular el divisor de salida MS0. Un `cal_ppb` positivo significa que el cristal es rápido (la frecuencia de salida sería demasiado alta), por lo que el VCO efectivo se reduce. Aplicar la calibración invalida la caché de banda, por lo que la siguiente llamada a `oscillator_set_freq()` recalcula la cadena divisora.
+**Si5351A:** La corrección en ppb se aplica a la frecuencia objetivo del VCO PLL antes de calcular el divisor de salida MS0. Un `cal_ppb` positivo significa que el cristal es rápido, por lo que el VCO efectivo se reduce. Aplicar la calibración invalida la caché de banda.
 
-**AD9850:** La corrección en ppb escala las constantes de conversión frecuencia-a-palabra-de-sintonización precomputadas antes de calcular cada palabra de frecuencia.
+**AD9850:** La corrección en ppb escala las constantes de conversión frecuencia-a-FTW precomputadas (`AD9850_FTW_PER_MHZ` y `AD9850_FTW_INT_PER_HZ`).
 
-En ambos casos, si una actualización de calibración llega durante una ventana de transmisión WSPR, se **difiere** y es aplicada por `oscillator_tx_end()` tras el símbolo final para evitar transitorios de frecuencia a mitad de transmisión.
+En ambos casos, si una actualización de calibración llega durante una ventana de transmisión WSPR activa, se **difiere** y es aplicada por `oscillator_tx_end()` tras el símbolo final para evitar transitorios de frecuencia a mitad de transmisión.
 
 ### Cómo medir el desplazamiento de tu cristal
 
@@ -1008,7 +1006,7 @@ En ambos casos, si una actualización de calibración llega durante una ventana 
 6. Introduce un valor **negativo** para bajar la salida (el cristal funciona rápido).
 7. Guarda y verifica en la siguiente transmisión.
 
-Alternativamente, los reportes de recepción de WSPRnet incluyen el desplazamiento de frecuencia en Hz medido por la estación receptora; esto puede usarse directamente para estimar el error de calibración.
+Alternativamente, los reportes de recepción de WSPRnet incluyen el desplazamiento de frecuencia en Hz medido por la estación receptora.
 
 <div align="right">
   <a href="#readme-top">
@@ -1022,18 +1020,20 @@ Alternativamente, los reportes de recepción de WSPRnet incluyen el desplazamien
 
 | Característica | Estado |
 |---|---|
-| Codificador WSPR Tipo 1 (indicativo + localizador + potencia) | ✅ Completo |
+| Codificador WSPR Tipo 1 (indicativo simple + localizador 4 chars) | ✅ Completo |
 | Codificador WSPR Tipo 2 (indicativo compuesto con '/') | ✅ Completo |
 | Codificador WSPR Tipo 3 (acompañante localizador 6 chars) | ✅ Completo |
-| Alternancia Tipo 1/Tipo 3 (localizador 6 chars) | ✅ Completo |
-| Alternancia Tipo 2/Tipo 3 (indicativo compuesto) | ✅ Completo |
+| Alternancia Tipo 1 / Tipo 3 (localizador 6 chars) | ✅ Completo |
+| Alternancia Tipo 2 / Tipo 3 (indicativo compuesto) | ✅ Completo |
 | Driver de oscilador Si5351A (I2C, autodetección) | ✅ Completo |
 | Driver de oscilador AD9850 DDS (bit-bang GPIO) | ✅ Completo |
 | Modo ficticio del oscilador (sin hardware) | ✅ Completo |
 | Driver de banco LPF GPIO de 3 bits | ✅ Completo |
-| Sincronía de tiempo NTP (SNTP) | ✅ Completo |
-| Sincronía de tiempo GPS (NMEA UART, $GPRMC/$GNRMC/$GPZDA/$GNZDA) | ✅ Completo |
-| Precisión sub-segundo GPS PPS (ISR de flanco ascendente) | ✅ Completo |
+| Autodetección GPS en tiempo de ejecución (sondeo UART al arrancar) | ✅ Completo |
+| Sincronía de tiempo GPS (NMEA $GPRMC/$GNRMC/$GPZDA/$GNZDA) | ✅ Completo |
+| Corrección sub-segundo GPS PPS (ISR de flanco ascendente) | ✅ Completo |
+| Extracción de posición GPS (botón "Desde GPS") | ✅ Completo |
+| Sincronía de tiempo NTP (SNTP fallback) | ✅ Completo |
 | Modo Wi-Fi STA | ✅ Completo |
 | Fallback Wi-Fi AP (192.168.4.1) | ✅ Completo |
 | Temporizador de reconexión Wi-Fi en segundo plano | ✅ Completo |
@@ -1041,7 +1041,7 @@ Alternativamente, los reportes de recepción de WSPRnet incluyen el desplazamien
 | Interfaz web SPA embebida | ✅ Completo |
 | API REST (config, status, tx_toggle, reset, scan) | ✅ Completo |
 | Autenticación HTTP Básica | ✅ Completo |
-| Selección de región UAIRO para 60 m | ✅ Completo |
+| Selección de región IARU para 60 m | ✅ Completo |
 | Soporte de 12 bandas (2200 m – 10 m) | ✅ Completo |
 | Salto de frecuencia | ✅ Completo |
 | Ciclo de trabajo TX (acumulador determinista) | ✅ Completo |
@@ -1087,7 +1087,7 @@ Características y mejoras planeadas para futuras versiones:
 
 Las contribuciones son lo que hace que la comunidad de código abierto sea un lugar increíble para aprender, inspirar y crear. Cualquier contribución que hagas es **muy apreciada**.
 
-Si tienes una sugerencia que mejoraría esto, por favor haz un fork del repositorio y crea un pull request. También puedes simplemente abrir un issue con la etiqueta "enhancement". ¡No olvides darle una estrella al proyecto! ¡Muchas gracias!
+Si tienes una sugerencia que mejoraría esto, por favor haz un fork del repositorio y crea un pull request. También puedes simplemente abrir un issue con la etiqueta "enhancement". ¡No olvides darle una estrella al proyecto!
 
 1. Haz un fork (<https://github.com/hiperiondev/ESP32_WSPR/fork>)
 2. Crea tu rama de característica (`git checkout -b feature/MiCaracteristica`)
