@@ -106,61 +106,60 @@ menu "WSPR Transmitter"
             Reference oscillator frequency on the AD9850 module in Hz.
             Most common modules use 125000000.
 
-    choice WSPR_TIME_SOURCE
-        prompt "Time synchronization source"
-        default WSPR_TIME_NTP
+    config GPS_UART_PORT
+        int "GPS UART port number"
+        default 1
+        range 0 2
         help
-            Select how the ESP32 obtains accurate UTC time for WSPR scheduling.
+            ESP32 UART peripheral index connected to the GPS module.
+            Used both for the boot-time auto-detection probe and for the
+            permanent NMEA receive task when GPS is confirmed.
 
-        config WSPR_TIME_NTP
-            bool "NTP (SNTP over WiFi)"
+    config GPS_RX_GPIO
+        int "GPS RX GPIO (ESP32 receives NMEA from GPS TX)"
+        default 16
+        range 0 39
 
-        config WSPR_TIME_GPS
-            bool "GPS (NMEA RMC/ZDA sentences via UART)"
+    config GPS_TX_GPIO
+        int "GPS TX GPIO (ESP32 transmits to GPS RX)"
+        default 17
+        range 0 39
 
-    endchoice
+    config GPS_BAUD_RATE
+        int "GPS baud rate"
+        default 9600
+        help
+            Serial baud rate of the GPS module. Most modules default to 9600.
 
-    if WSPR_TIME_GPS
+    config GPS_PPS_GPIO
+        int "GPS PPS GPIO (-1 to disable)"
+        default -1
+        range -1 39
+        help
+            GPIO connected to the GPS module PPS (Pulse-Per-Second) output.
+            Set to -1 (default) to disable PPS and rely on NMEA timing only.
+            When set to a valid GPIO (0-39), a rising-edge ISR fires on each
+            PPS pulse and snaps the system clock sub-second component to zero,
+            correcting UART latency jitter (~10 ms) down to a few microseconds.
+            The NMEA RMC or ZDA sentence must still provide the correct UTC
+            second value; PPS only improves the sub-second accuracy.
+            The GPIO must support input mode and external interrupts.
+            Avoid GPIO 6-11 (SPI flash) and strapping pins (0, 2, 12, 15).
 
-        config GPS_UART_PORT
-            int "GPS UART port number"
-            default 1
-            range 0 2
-            help
-                ESP32 UART peripheral index connected to the GPS module.
-
-        config GPS_RX_GPIO
-            int "GPS RX GPIO (ESP32 receives NMEA from GPS TX)"
-            default 16
-            range 0 39
-
-        config GPS_TX_GPIO
-            int "GPS TX GPIO (ESP32 transmits to GPS RX)"
-            default 17
-            range 0 39
-
-        config GPS_BAUD_RATE
-            int "GPS baud rate"
-            default 9600
-            help
-                Serial baud rate of the GPS module. Most modules default to 9600.
-
-        config GPS_PPS_GPIO
-            int "GPS PPS GPIO (-1 to disable)"
-            default -1
-            range -1 39
-            help
-                GPIO connected to the GPS module PPS (Pulse-Per-Second) output.
-                Set to -1 (default) to disable PPS and rely on NMEA timing only.
-                When set to a valid GPIO (0-39), a rising-edge ISR fires on each
-                PPS pulse and snaps the system clock sub-second component to zero,
-                correcting UART latency jitter (~10 ms) down to a few microseconds.
-                The NMEA RMC or ZDA sentence must still provide the correct UTC
-                second value; PPS only improves the sub-second accuracy.
-                The GPIO must support input mode and external interrupts.
-                Avoid GPIO 6-11 (SPI flash) and strapping pins (0, 2, 12, 15).
-
-    endif
+    config GPS_DETECT_TIMEOUT_MS
+        int "GPS auto-detection timeout (ms)"
+        default 3000
+        range 1000 10000
+        help
+            Time in milliseconds that time_sync_init() listens on the GPS UART
+            looking for a valid NMEA sentence at boot time.
+            If a valid sentence with a correct checksum is received within this
+            window, GPS mode is activated; otherwise the firmware falls back to
+            NTP over Wi-Fi.
+            A value of 3000 ms (3 seconds) works well for most GPS modules that
+            output NMEA sentences at 1 Hz.  Increase to 5000-8000 ms for modules
+            that take longer to start outputting sentences after power-on.
+            This probe only occurs once at boot; no impact on normal operation.
 
     config FILTER_GPIO_A
         int "LPF select GPIO bit 0 (A)"

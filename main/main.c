@@ -626,12 +626,6 @@ static void scheduler_task(void *arg) {
 }
 
 void app_main(void) {
-
-#if defined(CONFIG_WSPR_TIME_GPS)
-    setenv("TZ", "UTC0", 1);
-    tzset();
-#endif
-
     g_boot_uptime_sec = (uint32_t)(esp_log_timestamp() / 1000u);
 
     esp_reset_reason_t reset_rsn = esp_reset_reason();
@@ -654,6 +648,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(wifi_manager_start(g_cfg.wifi_ssid, g_cfg.wifi_pass));
 
     ESP_ERROR_CHECK(time_sync_init(g_cfg.ntp_server));
+    ESP_LOGI(TAG, "Time source: %s", time_sync_source() == TIME_SYNC_GPS ? "GPS (auto-detected)" : "NTP (fallback)");
 
     ESP_ERROR_CHECK(web_server_start(&g_cfg));
 
