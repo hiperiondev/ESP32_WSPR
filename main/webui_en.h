@@ -24,6 +24,10 @@
 #define WEBUI_HINT_XTAL_CAL      "Crystal offset in ppb. 0=no correction."
 #define WEBUI_BTN_SAVE           "&#128190; Save configuration"
 
+// "From GPS" button label — shown to the right of the Maidenhead locator input.
+// Button is enabled when GPS module is detected, disabled when NTP mode is active.
+#define WEBUI_BTN_FROM_GPS "&#128204; GPS"
+
 // WiFi card
 #define WEBUI_CARD_WIFI_TITLE "WiFi Network (STA mode)"
 #define WEBUI_BTN_SCAN_LABEL  "&#128268; Scan WiFi networks..."
@@ -92,3 +96,6 @@
 
 #define WEBUI_JS_ERR_CALLSIGN "Invalid callsign (3-11 chars, A-Z 0-9 and space only)"
 #define WEBUI_JS_ERR_LOCATOR  "Invalid locator (4 or 6 chars: AA00 or AA00AA format, e.g. GF05 or GF05ab)"
+
+// JS toast message when GPS locator fetch fails
+#define WEBUI_JS_GPS_LOC_ERR "GPS position not yet available"

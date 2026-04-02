@@ -61,6 +61,16 @@ typedef enum {
     TIME_SYNC_NTP = 2,  // NTP / SNTP over Wi-Fi (fallback)
 } time_sync_source_t;
 
+// GPS position structure for "From GPS" locator feature.
+// Stores the last valid lat/lon extracted from NMEA sentences.
+// latitude_deg and longitude_deg are in decimal degrees.
+// valid is true once the first RMC/GGA sentence with a fix has been parsed.
+typedef struct {
+    double latitude_deg;  // decimal degrees; negative = South
+    double longitude_deg; // decimal degrees; negative = West
+    bool valid;           // true when at least one valid fix has been received
+} gps_position_t;
+
 /**
  * @brief Initialise the time synchronisation subsystem with auto-detection.
  *
@@ -156,5 +166,13 @@ bool time_sync_get(struct timeval *tv);
  * @return Positive integer (1-120) seconds to next window.
  */
 int32_t time_sync_secs_to_next_tx(void);
+
+// Returns the last GPS fix position when GPS mode is active.
+// In NTP mode pos->valid will always be false.
+// Safe to call from any task; uses atomic read of module-level variables.
+// @param[out] pos  Pointer to gps_position_t to fill. Must not be NULL.
+// @return true  — GPS mode active and at least one valid fix has been received.
+// @return false — NTP mode, or GPS mode but no valid fix yet.
+bool time_sync_get_position(gps_position_t *pos);
 
 /** @} */

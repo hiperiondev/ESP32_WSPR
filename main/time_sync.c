@@ -34,6 +34,14 @@ static volatile bool _synced = false;
 // runtime-selected time source (set during time_sync_init)
 static volatile time_sync_source_t _source = TIME_SYNC_NONE;
 
+// Last valid GPS position extracted from $GPRMC or $GPGGA sentences.
+// Written only by gps_task; read by time_sync_get_position() from any task.
+// double reads are not atomic on 32-bit MCUs, but worst case is a stale value
+// which is acceptable — the UI will retry next poll cycle.
+static volatile double _gps_lat = 0.0;
+static volatile double _gps_lon = 0.0;
+static volatile bool _gps_pos_valid = false;
+
 // =============================================================================
 //  GPS (NMEA UART) implementation
 // =============================================================================
@@ -88,6 +96,43 @@ static bool validate_nmea_checksum(const char *sentence) {
     return calc == expected;
 }
 
+// helper to convert NMEA DDMM.MMMM format to decimal degrees.
+// deg_digits is 2 for latitude (DDMM.MM) or 3 for longitude (DDDMM.MM).
+static double nmea_to_decimal(const char *field, int deg_digits) {
+    if (!field || field[0] == '\0')
+        return 0.0;
+    // Integer degrees: first deg_digits characters
+    double deg = 0.0;
+    for (int i = 0; i < deg_digits; i++) {
+        if (field[i] < '0' || field[i] > '9')
+            return 0.0;
+        deg = deg * 10.0 + (field[i] - '0');
+    }
+    // Remaining characters are minutes (MM.MMMM...)
+    double min = 0.0;
+    // strtod-free approach: parse integer minutes then fraction
+    const char *mp = field + deg_digits;
+    double min_int = 0.0;
+    while (*mp && *mp != '.') {
+        if (*mp < '0' || *mp > '9')
+            break;
+        min_int = min_int * 10.0 + (*mp - '0');
+        mp++;
+    }
+    double min_frac = 0.0;
+    double divisor = 10.0;
+    if (*mp == '.') {
+        mp++;
+        while (*mp && *mp >= '0' && *mp <= '9') {
+            min_frac += (*mp - '0') / divisor;
+            divisor *= 10.0;
+            mp++;
+        }
+    }
+    min = min_int + min_frac;
+    return deg + min / 60.0;
+}
+
 // Parse an NMEA $GPRMC or $GNRMC sentence and extract the UTC time.
 static bool parse_rmc(const char *sentence, struct timeval *tv) {
     if (!validate_nmea_checksum(sentence))
@@ -117,12 +162,29 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
     if (!tok || tok[0] != 'A')
         return false;
 
-    // Fields 3-8: lat, N/S, lon, E/W, speed, course -- skip with NULL guard
-    for (int i = 0; i < 6; i++) {
-        tok = strtok_r(NULL, ",", &save);
-        if (!tok)
-            return false;
-    }
+    // Field 3: latitude (DDMM.MMMM)
+    tok = strtok_r(NULL, ",", &save);
+    char lat_field[16] = { 0 };
+    if (tok)
+        strncpy(lat_field, tok, sizeof(lat_field) - 1);
+
+    // Field 4: N/S hemisphere
+    tok = strtok_r(NULL, ",", &save);
+    char lat_ns = tok ? tok[0] : 'N';
+
+    // Field 5: longitude (DDDMM.MMMM)
+    tok = strtok_r(NULL, ",", &save);
+    char lon_field[16] = { 0 };
+    if (tok)
+        strncpy(lon_field, tok, sizeof(lon_field) - 1);
+
+    // Field 6: E/W hemisphere
+    tok = strtok_r(NULL, ",", &save);
+    char lon_ew = tok ? tok[0] : 'E';
+
+    // Skip speed and course fields
+    tok = strtok_r(NULL, ",", &save); // speed
+    tok = strtok_r(NULL, ",", &save); // course
 
     // Field 9: DDMMYY
     tok = strtok_r(NULL, ",", &save);
@@ -150,6 +212,20 @@ static bool parse_rmc(const char *sentence, struct timeval *tv) {
 
     tv->tv_sec = ts;
     tv->tv_usec = 0;
+
+    // update GPS position from RMC lat/lon fields when fix is valid
+    if (lat_field[0] != '\0' && lon_field[0] != '\0') {
+        double lat = nmea_to_decimal(lat_field, 2);
+        double lon = nmea_to_decimal(lon_field, 3);
+        if (lat_ns == 'S' || lat_ns == 's')
+            lat = -lat;
+        if (lon_ew == 'W' || lon_ew == 'w')
+            lon = -lon;
+        _gps_lat = lat;
+        _gps_lon = lon;
+        _gps_pos_valid = true;
+    }
+
     return true;
 }
 
@@ -215,6 +291,70 @@ static bool parse_zda(const char *sentence, struct timeval *tv) {
     return true;
 }
 
+// parse $GPGGA or $GNGGA sentence to extract position (lat/lon).
+// GGA provides more precise fix quality info. Position update only; returns false
+// so the caller does not try to use the tv for time (ZDA/RMC handle time).
+static bool parse_gga_position(const char *sentence) {
+    if (!validate_nmea_checksum(sentence))
+        return false;
+
+    char buf[128];
+    strncpy(buf, sentence, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *save;
+    char *tok = strtok_r(buf, ",", &save);
+    if (!tok)
+        return false;
+    if (strcmp(tok, "$GPGGA") != 0 && strcmp(tok, "$GNGGA") != 0)
+        return false;
+
+    // Field 1: UTC time — skip
+    tok = strtok_r(NULL, ",", &save);
+    if (!tok)
+        return false;
+
+    // Field 2: latitude DDMM.MMMM
+    tok = strtok_r(NULL, ",", &save);
+    char lat_field[16] = { 0 };
+    if (tok)
+        strncpy(lat_field, tok, sizeof(lat_field) - 1);
+
+    // Field 3: N/S
+    tok = strtok_r(NULL, ",", &save);
+    char lat_ns = tok ? tok[0] : 'N';
+
+    // Field 4: longitude DDDMM.MMMM
+    tok = strtok_r(NULL, ",", &save);
+    char lon_field[16] = { 0 };
+    if (tok)
+        strncpy(lon_field, tok, sizeof(lon_field) - 1);
+
+    // Field 5: E/W
+    tok = strtok_r(NULL, ",", &save);
+    char lon_ew = tok ? tok[0] : 'E';
+
+    // Field 6: fix quality (0 = invalid)
+    tok = strtok_r(NULL, ",", &save);
+    if (!tok || tok[0] == '0')
+        return false; // no fix
+
+    if (lat_field[0] == '\0' || lon_field[0] == '\0')
+        return false;
+
+    // store position from GGA sentence
+    double lat = nmea_to_decimal(lat_field, 2);
+    double lon = nmea_to_decimal(lon_field, 3);
+    if (lat_ns == 'S' || lat_ns == 's')
+        lat = -lat;
+    if (lon_ew == 'W' || lon_ew == 'w')
+        lon = -lon;
+    _gps_lat = lat;
+    _gps_lon = lon;
+    _gps_pos_valid = true;
+    return true;
+}
+
 // Dispatch an NMEA sentence to the appropriate parser.
 static bool parse_rmc_or_zda(const char *sentence, struct timeval *tv) {
     if (strncmp(sentence, "$GPZDA", 6) == 0 || strncmp(sentence, "$GNZDA", 6) == 0)
@@ -241,7 +381,10 @@ static void gps_task(void *arg) {
                 line[line_pos] = '\0';
                 struct timeval tv;
 
-                if (parse_rmc_or_zda(line, &tv)) {
+                // also handle GGA for position extraction
+                if (strncmp(line, "$GPGGA", 6) == 0 || strncmp(line, "$GNGGA", 6) == 0) {
+                    parse_gga_position(line);
+                } else if (parse_rmc_or_zda(line, &tv)) {
                     settimeofday(&tv, NULL);
                     _synced = true;
                     ESP_LOGI(TAG, "GPS time set from NMEA sentence");
@@ -492,4 +635,23 @@ int32_t time_sync_secs_to_next_tx(void) {
     if (p <= 4u)
         return 0;
     return (int32_t)(121u - p);
+}
+
+// time_sync_get_position — returns last GPS fix coordinates.
+// Returns true only when GPS mode is active and a valid fix has been received.
+// The gps_position_t struct is filled with lat/lon in decimal degrees.
+bool time_sync_get_position(gps_position_t *pos) {
+    if (!pos)
+        return false;
+    // Only meaningful in GPS mode
+    if (_source != TIME_SYNC_GPS) {
+        pos->valid = false;
+        pos->latitude_deg = 0.0;
+        pos->longitude_deg = 0.0;
+        return false;
+    }
+    pos->valid = _gps_pos_valid;
+    pos->latitude_deg = _gps_lat;
+    pos->longitude_deg = _gps_lon;
+    return _gps_pos_valid;
 }

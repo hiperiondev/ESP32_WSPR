@@ -1,5 +1,5 @@
 /**
- * @file webui_es,h
+ * @file webui_es.h
  * @author Emiliano Augusto Gonzalez
  * @copyright Copyright (c) 2026 Emiliano Augusto Gonzalez (lu3vea@gmail.com)
  * @brief WEBUI spanish translation.
@@ -23,6 +23,10 @@
 #define WEBUI_LABEL_XTAL_CAL     "Calibraci&#243;n XTAL (ppb)"
 #define WEBUI_HINT_XTAL_CAL      "Compensaci&#243;n del cristal en ppb. 0&#61;sin correcci&#243;n."
 #define WEBUI_BTN_SAVE           "&#128190; Guardar configuraci&#243;n"
+
+// "From GPS" button label in Spanish — shown to the right of the Maidenhead locator input.
+// Button is enabled when GPS module is detected, disabled when NTP mode is active.
+#define WEBUI_BTN_FROM_GPS "&#128204; GPS"
 
 // WiFi card
 #define WEBUI_CARD_WIFI_TITLE "Red WiFi (modo STA)"
@@ -95,3 +99,6 @@
 // mensajes de error de validacion en cliente para indicativo y localizador
 #define WEBUI_JS_ERR_CALLSIGN "Indicativo inv\u00e1lido (3-11 car., solo A-Z 0-9 y espacio)"
 #define WEBUI_JS_ERR_LOCATOR  "Localizador inv\u00e1lido (4 o 6 car.: formato AA00 o AA00AA, ej. GF05 o GF05ab)"
+
+// JS toast message when GPS locator fetch fails (Spanish)
+#define WEBUI_JS_GPS_LOC_ERR "Posici\\u00f3n GPS no disponible a\\u00fan"
