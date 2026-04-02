@@ -219,6 +219,11 @@ static inline uint32_t config_band_freq_hz(iaru_region_t region, wspr_band_t ban
     int idx = (int)region - 1;
     if (idx < 0 || idx > 2)
         idx = 0;
+    // Clamp band index to prevent out-of-bounds access on
+    // BAND_FREQ_HZ if an invalid wspr_band_t value is passed (e.g. race condition
+    // or uninitialized memory). Default to BAND_40M on any invalid band value.
+    if ((int)band < 0 || (int)band >= (int)BAND_COUNT)
+        band = BAND_40M;
     return BAND_FREQ_HZ[idx][(int)band];
 }
 

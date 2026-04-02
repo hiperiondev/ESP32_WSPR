@@ -113,6 +113,8 @@ static TaskHandle_t _gps_task = NULL;
 
 // Timestamp of the last PPS rising edge in microseconds (esp_timer_get_time())
 static volatile int64_t _pps_us = 0;
+// flag set by ISR when a PPS pulse fires; cleared by gps_task
+static volatile bool _pps_fired = false;
 #else
 #define GPS_PPS_ENABLED 0
 #endif
@@ -128,13 +130,12 @@ static volatile int64_t _pps_us = 0;
  * @param arg Unused ISR argument.
  */
 static void IRAM_ATTR pps_isr(void *arg) {
-    _pps_us = esp_timer_get_time();
-
-    // Zero the microsecond field to align the wall clock to the PPS pulse edge
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    tv.tv_usec = 0;
-    settimeofday(&tv, NULL);
+    // only record timestamp in the ISR.
+    // gettimeofday() and settimeofday() are NOT ISR-safe on ESP-IDF — they
+    // acquire FreeRTOS mutexes internally and can deadlock or assert.
+    // The sub-second correction is applied from gps_task() in task context.
+    _pps_us = esp_timer_get_time(); // esp_timer_get_time is ISR-safe
+    _pps_fired = true;              // signal gps_task to zero tv_usec
 }
 #endif
 
@@ -382,6 +383,19 @@ static void gps_task(void *arg) {
                     settimeofday(&tv, NULL);
                     _synced = true;
                     ESP_LOGI(TAG, "GPS time set from NMEA sentence");
+#if GPS_PPS_ENABLED
+                    // apply PPS sub-second correction here in
+                    // task context where gettimeofday/settimeofday are safe.
+                    // The ISR only sets _pps_fired; the actual clock adjustment
+                    // happens here to avoid calling mutex-acquiring functions from ISR.
+                    if (_pps_fired) {
+                        _pps_fired = false;
+                        struct timeval tv_pps;
+                        gettimeofday(&tv_pps, NULL);
+                        tv_pps.tv_usec = 0;
+                        settimeofday(&tv_pps, NULL);
+                    }
+#endif
                 }
                 line_pos = 0;
             } else if (c != '\r' && line_pos < (int)(sizeof(line) - 1)) {
@@ -459,7 +473,13 @@ bool time_sync_is_ready(void) {
     return _synced;
 }
 
+// clamp timeout_ms to avoid uint32_t wrap when elapsed += 500 is repeated many times.
+// Maximum meaningful value: 0xFFFFFE00 ms (~49.7 days). Values above this would silently
+// wrap the elapsed accumulator before the timeout expires, causing premature false returns.
 bool time_sync_wait(uint32_t timeout_ms) {
+    // Clamp to avoid uint32_t wrap in the elapsed accumulator (step = 500 ms)
+    if (timeout_ms > 0xFFFFFE00u)
+        timeout_ms = 0xFFFFFE00u;
     // Poll _synced every 500 ms; block indefinitely when timeout_ms is 0
     uint32_t elapsed = 0;
     while (!_synced) {
@@ -480,30 +500,40 @@ bool time_sync_get(struct timeval *tv) {
     return true;
 }
 
-// WSPR transmissions must start at the 2nd second of an even UTC minute boundary.
-// Per the official MEPT_JT / Wsprry-Pi specification: transmissions start at
-// hh:00:02, hh:02:02, ... (second 2 of each 120-second slot).
-// Reference: https://wsprry-pi.readthedocs.io/en/latest/About_WSPR/
-// Reference: https://qrp-labs.com/ultimate3/u3info/dt.html (DT investigation)
-// The G4JNT 2009 document says ":01" but the authoritative MEPT_JT spec says ":02".
+// WSPR transmissions must start at second 1 of each even UTC minute.
+// Per the G4JNT/K1JT WSPR 2.0 specification:
+//   "Transmissions nominally start one second into an even UTC minute
+//    (e.g. at hh:00:01, hh:02:01, ...)"
+// References:
+//   - G4JNT 2009: http://www.g4jnt.com/Coding/WSPR_Coding_Process.pdf
+//   - K1JT WSPR 2.0 User Guide (Princeton University)
+//   - m0xpd blog 2013: "a WSPR message must start 1 second into an even minute"
+//     http://m0xpd.blogspot.com/2013/01/
+//   - https://swharden.com/software/FSKview/wspr/ ("begins 1 sec after even minutes")
+//   - https://en.wikipedia.org/wiki/WSPR_(amateur_radio_software)
 //
-// The 2-minute cycle period comes from the WSPR frame duration:
-//   162 symbols * 8192/12000 s/symbol ≈ 110.6 s
-// rounded up to 120 s (2 minutes) for the standard 2-minute slot grid.
-// WSPR spec requires the first symbol at second :02 of the even minute.
-// open window: p==2,3,4 (target is 2; allow up to 4 for late-start detection).
-// Return value when p<2: distance to phase=2, not to phase=0.
+// The 2-minute cycle comes from the WSPR frame duration:
+//   162 symbols * 8192/12000 s/symbol = 110.6 s, rounded up to 120 s (2 min).
+//
+// Phase mapping for scheduler_task (main.c):
+//   p == 0  : pre-arm second (:00) — return 0 so the scheduler enters the fine loop
+//             immediately and can set oscillator + LPF one second before TX starts.
+//   p == 1  : TX start second (:01) — return 0 (window is open now).
+//   p == 2..4: just missed the TX window — return 0 so the scheduler enters the fine
+//             loop, detects phase >= 2 && <= 4, and skips this slot without sleeping
+//             through the entire remainder of the 2-minute cycle.
+//   p >= 5  : wait until next phase == 1, which is (120 - p + 1) = (121 - p) seconds away.
 int32_t time_sync_secs_to_next_tx(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     uint32_t p = (uint32_t)(tv.tv_sec % 120u);
-
-    if (p == 1u) {
-        return 0; // exactly at the target start second
-    }
-    if (p == 0u) {
-        return 1; // one second until the prep window
-    }
-    // p >= 2: wait for the next cycle's second 1 (121 - p)
+    // Phase 0: pre-arm second — return 0 so the scheduler enters the fine loop
+    // Phase 1: TX start second — return 0 (window open)
+    if (p <= 1u)
+        return 0;
+    // Phase 2..4: just missed the window — caller will skip this slot via phase check
+    if (p <= 4u)
+        return 0;
+    // p >= 5: wait until the next phase == 1, which is (121 - p) seconds away
     return (int32_t)(121u - p);
 }

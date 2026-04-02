@@ -164,7 +164,8 @@ static esp_err_t si_init_pll(void) {
         a = 15UL; // MSNA minimum integer multiplier per AN619
     if (a > 90UL)
         a = 90UL; // MSNA maximum integer multiplier per AN619
-    _si_vco = a * xtal_mhz * 1000000UL;
+    // Use exact crystal frequency instead of MHz-truncated value.
+    _si_vco = a * _si_xtal;
     // P1 for integer-only PLL: P1 = 128*a - 512, P2=0, P3=1 (b=0, c=1)
     uint32_t p1 = 128UL * a - 512UL;
     uint8_t pll_regs[8] = {
@@ -201,6 +202,9 @@ typedef struct {
 
 static si5351_band_cache_t _si_cache = { 0 };
 static uint32_t _si_last_set_hz = 0u; // avoids re-running si_cache_band() on repeated calls
+// Track last PLL integer multiplier to skip unnecessary PLL resets.
+// A PLL reset causes a ~200 µs output glitch; skip it when pll_a has not changed.
+static uint32_t _si_last_pll_a = 0u;
 
 /**
  * @brief Write all 8 PLL Multisynth (MSNA) registers for fractional mode.
@@ -485,8 +489,21 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     if (err != ESP_OK)
         return err;
 
-    // Reset PLLA to lock to the new parameters
-    return si_write(SI5351_PLL_RESET, 0x20);
+    // Only reset PLLA when the integer multiplier changed (VCO changed).
+    // Skipping the reset when pll_a is unchanged avoids a ~200 µs output glitch
+    // caused by the PLL momentarily losing lock during the re-lock sequence.
+    // When pll_a does change (band hop or first use), reset and wait for PLL to
+    // re-lock (Si5351A: typ 100 µs, allow one FreeRTOS tick = 1 ms margin).
+    // This adds <1 ms to band-change setup time, not to per-symbol timing.
+    if (pll_a != _si_last_pll_a) {
+        err = si_write(SI5351_PLL_RESET, 0x20);
+        if (err != ESP_OK)
+            return err;
+        // Wait for PLL re-lock before returning to the caller
+        vTaskDelay(1);
+        _si_last_pll_a = pll_a;
+    }
+    return ESP_OK;
 }
 
 /**
@@ -518,7 +535,23 @@ static esp_err_t si_apply_tone(uint32_t tone_millihz) {
     // Compute delta_b using the 3-term decomposition to stay within 32-bit arithmetic
     uint32_t delta_b = scaled_tone * _si_cache.b_step_int;
     delta_b += (scaled_tone * _si_cache.b_step2_int) / 1000UL;
-    delta_b += (scaled_tone * _si_cache.b_step2_rem) / _si_cache.full_den;
+    // Split using xtal_kHz as intermediate divisor to keep both
+    // intermediates within uint32_t range:
+    //   q = scaled_tone / xtal_kHz  (max ~22, safe)
+    //   r = scaled_tone % xtal_kHz  (max 26999, safe)
+    //   (q * b_step2_rem) / 1000    (max 22*26999/1000=593, safe)
+    //   (r * b_step2_rem) / full_den (max 26999*26999/27e6=26, intermediate 728M, safe)
+    {
+        uint32_t xkHz = _si_cache.xtal_kHz;   // e.g. 25000 or 27000
+        uint32_t rem = _si_cache.b_step2_rem; // < xtal_kHz, max 26999
+        uint32_t den = _si_cache.full_den;    // = xtal_Hz (25e6 or 27e6)
+        uint32_t q = scaled_tone / xkHz;      // <= 562560/25000 = 22, fits uint32_t
+        uint32_t r = scaled_tone % xkHz;      // < 27000, fits uint32_t
+        // q*rem <= 22*26999 = 593,978 -> /1000 = 593 (safe, no overflow)
+        // r*rem <= 26999*26999 = 728,946,001 < 2^30 (safe, fits uint32_t)
+        delta_b += (q * rem) / 1000UL;
+        delta_b += (r * rem) / den;
+    }
     uint32_t pll_b = _si_cache.pll_b_base + delta_b;
 
     // Clamp to valid range [0, pll_c - 1]
@@ -911,14 +944,12 @@ void oscillator_tx_begin(void) {
 
 void oscillator_tx_end(void) {
     _osc_tx_active = false;
-    // Apply any calibration update that arrived while the TX was in progress
+    // Route deferred calibration through oscillator_set_cal()
+    // so ALL oscillator types are handled, not only Si5351.
     if (_cal_pending) {
         _cal_pending = false;
-        _si_cal = _cal_pending_ppb;
-        // Invalidate the band cache so si_cache_band() runs again with new cal
-        _si_cache.valid = false;
-        _si_last_set_hz = 0u; // force full si_cache_band() on next oscillator_set_freq()
-        ESP_LOGI(TAG, "SI5351 deferred cal applied: %ld ppb", (long)_cal_pending_ppb);
+        ESP_LOGI(TAG, "Deferred cal applying: %ld ppb", (long)_cal_pending_ppb);
+        oscillator_set_cal(_cal_pending_ppb);
     }
 }
 
@@ -938,6 +969,13 @@ esp_err_t oscillator_set_cal(int32_t ppb) {
         _si_last_set_hz = 0u;
         ESP_LOGI(TAG, "SI5351 cal set: %ld ppb", (long)ppb);
     } else if (_osc_type == OSC_AD9850) {
+        // Defer AD9850 calibration when TX is active.
+        if (_osc_tx_active) {
+            _cal_pending = true;
+            _cal_pending_ppb = ppb;
+            ESP_LOGW(TAG, "AD9850 cal deferred (TX active): %ld ppb", (long)ppb);
+            return ESP_OK;
+        }
         // For AD9850: adjust the pre-computed FTW constants proportionally.
         // A positive ppb means the crystal runs fast, so we decrease the FTW
         // constants to output a slightly lower frequency and compensate.

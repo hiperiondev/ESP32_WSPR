@@ -73,48 +73,31 @@
  * @{
  */
 
-/**
- * @brief WSPR message type produced by @ref wspr_encode() for a given input.
- *
- * Callers must inspect this value (via @ref wspr_encode_type()) to determine
- * whether a companion Type-3 transmission is needed on the following
- * even-minute slot.
- */
+// MODIFIED: replaced Doxygen block comments with // style throughout; added clarifying
+// note for WSPR_MSG_TYPE_3 to document that the primary TX is still Type-1, not Type-3.
+
+// WSPR message type returned by wspr_encode_type() for a given callsign+locator pair.
+// Callers must inspect this value to decide whether a companion Type-3 slot is needed.
 typedef enum {
-    /**
-     * @brief Standard Type-1 message.
-     *
-     * Produced when the callsign is a simple amateur call (no @c '/' character)
-     * and the locator is 4 characters or fewer.  Contains the full callsign,
-     * 4-character grid square, and rounded TX power.  No companion message is
-     * required.
-     */
+    // Standard Type-1 message: simple callsign (no '/') + 4-char locator.
+    // The full callsign, 4-character grid square, and rounded TX power are encoded.
+    // No companion message is needed; transmit this type every available slot.
     WSPR_MSG_TYPE_1 = 1,
 
-    /**
-     * @brief Type-2 compound-callsign message.
-     *
-     * Produced when the callsign contains a @c '/' character (compound format,
-     * e.g. @c "PJ4/K1ABC" or @c "K1ABC/P").  Encodes the compound callsign in
-     * the 28-bit field and the prefix/suffix indicator in the 15-bit field.
-     * No locator is included in the Type-2 message itself.
-     *
-     * A companion @ref WSPR_MSG_TYPE_3 message must be transmitted on the
-     * following even-minute slot to provide the 6-character locator.
-     */
+    // Type-2 compound-callsign message: callsign contains '/' (e.g. "PJ4/K1ABC").
+    // The 28-bit field encodes the base callsign; the 15-bit field encodes the
+    // prefix or suffix indicator. No locator is included in the Type-2 frame.
+    // A companion Type-3 message (wspr_encode_type3) MUST be transmitted on the
+    // following even-minute slot to provide the 6-character locator.
+    // The scheduler alternates: parity==0 -> Type-2, parity==1 -> Type-3.
     WSPR_MSG_TYPE_2 = 2,
 
-    /**
-     * @brief Type-3 companion message — hashed callsign + 6-char locator.
-     *
-     * Produced as the companion to Type-2, or as an enhancement for Type-1
-     * when the caller provides a 6-character locator (sub-square precision).
-     * Encodes the 6-character Maidenhead sub-square in the 28-bit callsign
-     * field and a 15-bit CRC hash of the callsign in the locator field.
-     *
-     * Decoding software uses the hash to associate the Type-3 message with a
-     * previously received Type-1 or Type-2 message from the same station.
-     */
+    // Returned by wspr_encode_type() when a SIMPLE callsign + 6-char locator is used.
+    // NOTE: this value signals "alternation needed" — the PRIMARY transmission on
+    // parity==0 slots is still a Type-1 message (first 4 locator chars only).
+    // A companion Type-3 message (wspr_encode_type3) follows on parity==1 slots to
+    // convey the full 6-character sub-square locator and the callsign hash.
+    // The scheduler alternates: parity==0 -> Type-1 (4-char loc), parity==1 -> Type-3.
     WSPR_MSG_TYPE_3 = 3,
 } wspr_msg_type_t;
 

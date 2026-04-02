@@ -562,7 +562,22 @@ static void scheduler_task(void *arg) {
 #if CONFIG_WSPR_TASK_WDT_ENABLE
             esp_task_wdt_reset();
 #endif
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            // Wait until the TX window closes (phase >= 5, secs_to_next_tx > 0)
+            // before re-entering the main loop. Without this, the very next iteration
+            // calls time_sync_secs_to_next_tx(), gets 0 back for phases 0-4, enters the
+            // fine-alignment inner loop, and immediately fires spurious "Missed TX window"
+            // warnings for phases 2, 3, and 4. This occurs on every duty-cycle skip that
+            // coincides with the TX window boundary and on genuine missed windows at phases
+            // 2 or 3. The TX window is at most 5 seconds wide (phases 0-4); the
+            // 10-iteration guard prevents an infinite loop on clock error.
+            for (int _guard = 0; _guard < 10; _guard++) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                esp_task_wdt_reset();
+#endif
+                if (time_sync_secs_to_next_tx() > 0)
+                    break;
+            }
             continue;
         }
 

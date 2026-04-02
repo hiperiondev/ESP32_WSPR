@@ -545,6 +545,34 @@ static int parse_compound_callsign(const char *cs, char base_call[8], char prefi
     int before_len = slash_pos;                // characters before '/'
     int after_len = total_len - slash_pos - 1; // characters after '/'
 
+    // check suffix form FIRST when after_len <= 2.
+    // WSPR 2.0 Appendix B defines a suffix as 1 alphanumeric char or 2 digits.
+    // Preferring suffix prevents ambiguous splits like AB/37 (before=2, after=2)
+    // from being misclassified as PREFIX/BASE instead of the correct BASE/SUFFIX.
+    // If the suffix characters fail validation we fall through to prefix form.
+    if (after_len >= 1 && after_len <= 2 && before_len >= 1 && before_len <= 6) {
+        const char *suf = slash + 1;
+        bool suffix_valid;
+        if (after_len == 1) {
+            // Single character: any alphanumeric qualifies as a suffix
+            suffix_valid = (isalnum((unsigned char)suf[0]) != 0);
+        } else {
+            // Two-character suffix must be exactly two digits per WSPR 2.0 Appendix B
+            suffix_valid = (isdigit((unsigned char)suf[0]) != 0) && (isdigit((unsigned char)suf[1]) != 0);
+        }
+        if (suffix_valid) {
+            for (int i = 0; i < after_len; i++)
+                suffix[i] = toupper((unsigned char)suf[i]);
+            suffix[after_len] = '\0';
+            for (int i = 0; i < before_len; i++)
+                base_call[i] = toupper((unsigned char)cs[i]);
+            base_call[before_len] = '\0';
+            *has_suffix = 1;
+            return 0;
+        }
+        // Suffix characters invalid; fall through to try prefix form below
+    }
+
     // Prefix form: PREFIX/BASECALL  (prefix 1-3 chars, base 1-6 chars)
     if (before_len <= 3 && before_len >= 1 && after_len >= 1 && after_len <= 6) {
         // Validate prefix characters — must be alphanumeric
@@ -567,32 +595,6 @@ static int parse_compound_callsign(const char *cs, char base_call[8], char prefi
             base_call[i] = toupper((unsigned char)(slash + 1)[i]);
         base_call[after_len] = '\0';
         *has_prefix = 1;
-        return 0;
-    }
-
-    // Suffix form: BASECALL/SUFFIX  (base 1-6 chars, suffix 1-2 chars)
-    // Single character: any alphanumeric; two characters: must be two digits
-    if (after_len <= 2 && after_len >= 1 && before_len >= 1 && before_len <= 6) {
-        const char *suf = slash + 1;
-        if (after_len == 1) {
-            if (!isalnum((unsigned char)suf[0]))
-                return -1;
-        } else {
-            // Two-character suffix must be two digits (e.g. /37)
-            if (!isdigit((unsigned char)suf[0]) || !isdigit((unsigned char)suf[1]))
-                return -1;
-        }
-        for (int i = 0; i < after_len; i++)
-            suffix[i] = toupper((unsigned char)suf[i]);
-        suffix[after_len] = '\0';
-
-        if (before_len > 6)
-            return -1;
-        // The portion before '/' is the base callsign
-        for (int i = 0; i < before_len; i++)
-            base_call[i] = toupper((unsigned char)cs[i]);
-        base_call[before_len] = '\0';
-        *has_suffix = 1;
         return 0;
     }
 
@@ -733,11 +735,11 @@ static uint32_t callsign_hash15(const char *cs) {
         else
             v = 36u; // space or any other character
         // Accumulate n = n*37 + v (mod 2^30) using two 15-bit halves.
-        uint32_t lo_new = n_lo * 37u + v;       // max 1,212,415 -- fits uint32_t
-        uint32_t carry  = lo_new >> 15;          // carry into the upper half
-        n_lo = lo_new & 0x7FFFu;                 // keep bits[14:0]
-        uint32_t hi_new = n_hi * 37u + carry;    // max 1,212,416 -- fits uint32_t
-        n_hi = hi_new & 0x7FFFu;                 // keep bits[29:15] of n
+        uint32_t lo_new = n_lo * 37u + v;     // max 1,212,415 -- fits uint32_t
+        uint32_t carry = lo_new >> 15;        // carry into the upper half
+        n_lo = lo_new & 0x7FFFu;              // keep bits[14:0]
+        uint32_t hi_new = n_hi * 37u + carry; // max 1,212,416 -- fits uint32_t
+        n_hi = hi_new & 0x7FFFu;              // keep bits[29:15] of n
     }
     // XOR-fold: n_hi == n>>15, n_lo == n&0x7FFF, so result matches K1JT reference.
     return (n_hi ^ n_lo) & 0x7FFFu;
