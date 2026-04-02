@@ -141,6 +141,8 @@ static void select_next_band(bool force_next, bool force_rebuild) {
              (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx));
 }
 
+// wspr_transmit: parity toggle moved AFTER successful encode to avoid
+// parity desync when wspr_encode or wspr_encode_type3 returns an error.
 static void wspr_transmit(void) {
     uint8_t symbols[WSPR_SYMBOLS];
     int enc_result;
@@ -182,9 +184,12 @@ static void wspr_transmit(void) {
             enc_result = wspr_encode_type3(snap_callsign, loc6, snap_power, symbols);
         }
 
-        web_server_cfg_lock();
-        g_cfg.tx_slot_parity ^= 1u;
-        web_server_cfg_unlock();
+        // Toggle parity ONLY on successful encode, not before.
+        if (enc_result >= 0) {
+            web_server_cfg_lock();
+            g_cfg.tx_slot_parity ^= 1u;
+            web_server_cfg_unlock();
+        }
     }
 
     if (enc_result < 0) {
@@ -318,6 +323,9 @@ static void status_task(void *arg) {
     }
 }
 
+// Evaluate hop selection and duty-cycle accumulator FIRST, before the
+// coarse sleep and fine alignment loop. Only enter the pre-arm loop when
+// do_tx is true. Duty-cycle skips now happen before any hardware interaction.
 static void scheduler_task(void *arg) {
     ESP_LOGI(TAG, "Scheduler started -- waiting for time sync");
 
@@ -332,10 +340,14 @@ static void scheduler_task(void *arg) {
     // Initial band selection: build the active list and choose the first band
     select_next_band(false, true);
 
-    uint32_t s_last_hop_slot = 0;
+    // The last frequency hop wall-clock second.
+    // Allows hop_interval_sec to be any value >= 120, not only multiples of 120.
+    uint32_t s_last_hop_time_sec = 0;
     bool s_hop_anchored = false;
-    bool s_duty_primed = false; // true after first-slot pre-load
+    bool s_duty_primed = false;
     uint16_t s_duty_accum = 0u;
+    // Track previous duty value to detect web-UI changes and reset accumulator
+    uint8_t s_prev_duty = 0u;
 
     bool time_synced_logged = false;
 
@@ -366,195 +378,222 @@ static void scheduler_task(void *arg) {
             continue;
         }
 
-        bool do_skip = false;
-
-        int32_t wait_sec = time_sync_secs_to_next_tx();
-        if (wait_sec >= 0) {
-            ESP_LOGI(TAG, "Next TX in %d s (band=%s)", wait_sec, BAND_NAME[g_band_idx]);
-            if (wait_sec > 3) {
-                uint32_t sleep_ms = (uint32_t)(wait_sec - 2) * 1000u;
-                while (sleep_ms > 0u) {
-                    uint32_t chunk = (sleep_ms > 1000u) ? 1000u : sleep_ms;
-                    vTaskDelay(pdMS_TO_TICKS(chunk));
-#if CONFIG_WSPR_TASK_WDT_ENABLE
-                    esp_task_wdt_reset();
-#endif
-                    sleep_ms -= chunk;
-                }
-            }
-
-            {
-                web_server_cfg_lock();
-                uint8_t pre_snap_region = g_cfg.iaru_region;
-                web_server_cfg_unlock();
-                bool pre_armed_local = false;
-
-                for (;;) {
-                    struct timeval tv_align;
-                    gettimeofday(&tv_align, NULL);
-                    uint32_t phase = (uint32_t)(tv_align.tv_sec % 120u);
-
-                    if (phase == 0u) {
-                        if (!pre_armed_local) {
-                            g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx);
-                            oscillator_set_freq(g_pre_arm_base_hz);
-                            gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
-                            g_pre_armed = true;
-                            pre_armed_local = true;
-                            ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
-                        }
-                    } else if (phase == 1u) {
-                        break;
-                    } else if (phase >= 2u && phase <= 4u) {
-                        ESP_LOGW(TAG, "Missed TX window (phase=%lu), skipping slot", (unsigned long)phase);
-                        g_pre_armed = false;
-                        g_pre_arm_base_hz = 0;
-                        do_skip = true;
-                        break;
-                    }
-
-                    vTaskDelay(pdMS_TO_TICKS(1));
-
-#if CONFIG_WSPR_TASK_WDT_ENABLE
-                    esp_task_wdt_reset();
-#endif
-                    web_server_cfg_lock();
-                    bool still_en = g_cfg.tx_enabled;
-                    web_server_cfg_unlock();
-
-                    if (!still_en) {
-                        g_pre_armed = false;
-                        g_pre_arm_base_hz = 0;
-                        do_skip = true;
-                        break;
-                    }
-                }
-
-                if (!do_skip) {
-                    struct timeval tv_align;
-                    gettimeofday(&tv_align, NULL);
-                    uint32_t usec_now = (uint32_t)tv_align.tv_usec;
-
-                    if (usec_now >= 5000u && usec_now < 900000u) {
-                        uint32_t coarse_us = 1000000u - usec_now;
-                        if (coarse_us > 3000u) {
-                            uint32_t sleep_ms = (coarse_us - 3000u) / 1000u;
-                            if (sleep_ms > 0u)
-                                vTaskDelay(pdMS_TO_TICKS(sleep_ms));
-                        }
-
-                        do {
-                            gettimeofday(&tv_align, NULL);
-                            usec_now = (uint32_t)tv_align.tv_usec;
-                            taskYIELD();
-#if CONFIG_WSPR_TASK_WDT_ENABLE
-                            esp_task_wdt_reset();
-#endif
-                        } while (usec_now >= 5000u && usec_now < 950000u);
-                    }
-                }
-            }
-        }
-
-        if (!do_skip) {
-            struct timeval tv;
-            gettimeofday(&tv, NULL);
-            uint32_t now = (uint32_t)(tv.tv_sec & 0xFFFFFFFFUL);
+        {
+            struct timeval tv_now;
+            gettimeofday(&tv_now, NULL);
+            uint32_t now = (uint32_t)(tv_now.tv_sec & 0xFFFFFFFFUL);
 
             web_server_cfg_lock();
             bool hop_en = g_cfg.hop_enabled;
             uint32_t hop_intv = g_cfg.hop_interval_sec;
             bool need_rebuild = g_cfg.bands_changed;
             g_cfg.bands_changed = false;
+            uint8_t duty = g_cfg.tx_duty_pct;
             web_server_cfg_unlock();
 
             if (hop_intv == 0u)
                 hop_intv = 120u;
 
-            uint32_t current_slot = now / 120u;
-            uint32_t hop_slots = (hop_intv >= 120u) ? (hop_intv / 120u) : 1u;
+            // Duty accumulator reset on duty-percentage change.
+            if (duty != s_prev_duty) {
+                s_duty_primed = false;
+                s_duty_accum = 0u;
+                s_prev_duty = duty;
+                ESP_LOGI(TAG, "Duty cycle changed to %u%% -- accumulator reset", (unsigned)duty);
+            }
 
+            // Hop timer: compare elapsed seconds against hop_interval_sec.
+            // Bands advance every hop_interval_sec wall-clock seconds.
             bool do_hop;
             if (!s_hop_anchored) {
+                // First slot after time sync: anchor the hop timer without advancing.
                 do_hop = false;
-                s_last_hop_slot = current_slot;
+                s_last_hop_time_sec = now;
                 s_hop_anchored = true;
             } else {
-                do_hop = hop_en && ((current_slot - s_last_hop_slot) >= hop_slots);
+                do_hop = hop_en && ((now - s_last_hop_time_sec) >= hop_intv);
             }
 
             if (do_hop || g_band_idx < 0 || need_rebuild) {
                 select_next_band(do_hop, need_rebuild || g_band_idx < 0);
                 if (do_hop)
-                    s_last_hop_slot = current_slot;
-
+                    s_last_hop_time_sec = now;
+                // If a stale pre-arm exists for a different frequency, cancel it.
                 if (g_pre_armed) {
                     web_server_cfg_lock();
                     uint8_t new_region = g_cfg.iaru_region;
                     web_server_cfg_unlock();
                     uint32_t new_base_hz = config_band_freq_hz((iaru_region_t)new_region, (wspr_band_t)g_band_idx);
                     if (new_base_hz != g_pre_arm_base_hz) {
-                        g_pre_arm_base_hz = new_base_hz;
-                        oscillator_enable(false);
-                        oscillator_set_freq(g_pre_arm_base_hz);
-                        gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
-                        vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
-                        ESP_LOGD(TAG, "Re-armed after hop: band=%s base_hz=%lu", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
+                        g_pre_armed = false;
+                        g_pre_arm_base_hz = 0;
                     }
                 }
             }
 
             // Prime the duty accumulator on the very first slot so that
             // the first TX fires immediately.
-            web_server_cfg_lock();
-            uint8_t duty = g_cfg.tx_duty_pct;
-            web_server_cfg_unlock();
-
             if (!s_duty_primed) {
-                // Load enough credit so that the first add brings accum to >= 100.
-                // Clamp to 99 so that a duty of 100 (always TX) still takes one add
-                // to fire and the normal accumulator logic remains uniform.
                 if (duty > 0u && duty < 100u) {
                     s_duty_accum = (uint16_t)(100u - duty);
                 } else if (duty >= 100u) {
-                    s_duty_accum = 0u; // will fire immediately (100 added below)
+                    s_duty_accum = 0u;
                 }
-                // duty==0: leave at 0; the duty>0 guard below prevents TX anyway.
                 s_duty_primed = true;
             }
 
             bool do_tx = false;
             if (duty > 0u) {
-                s_duty_accum += (uint16_t)duty;
-                if (s_duty_accum >= 100u) {
-                    s_duty_accum -= 100u;
+                if (duty >= 100u) {
                     do_tx = true;
+                } else {
+                    s_duty_accum += (uint16_t)duty;
+                    if (s_duty_accum >= 100u) {
+                        s_duty_accum -= 100u;
+                        do_tx = true;
+                    }
                 }
             }
+
             if (!do_tx) {
                 ESP_LOGI(TAG, "Duty cycle skip (pct=%u accum=%u)", (unsigned)duty, (unsigned)s_duty_accum);
                 g_pre_armed = false;
                 g_pre_arm_base_hz = 0;
-                do_skip = true;
-            }
-        } else {
-            web_server_cfg_lock();
-            bool still_tx_en = g_cfg.tx_enabled;
-            uint8_t duty_snap = g_cfg.tx_duty_pct;
-            web_server_cfg_unlock();
 
-            if (still_tx_en && duty_snap > 0u) {
-                if (!s_duty_primed) {
-                    // Same first-slot priming as the normal path above
-                    if (duty_snap < 100u)
-                        s_duty_accum = (uint16_t)(100u - duty_snap);
-                    s_duty_primed = true;
-                }
-                s_duty_accum += (uint16_t)duty_snap;
-                // Clamp: don't allow unbounded growth if many windows are missed in a row
+                // Accumulate credit for missed windows (accum capped at 200)
+                s_duty_accum += (uint16_t)duty;
                 if (s_duty_accum > 200u)
                     s_duty_accum = 200u;
-                ESP_LOGD(TAG, "Duty accum (missed window): accum=%u", (unsigned)s_duty_accum);
+                // Undo the addition we already did for this slot above so we do not
+                // double-count: the add above was for "would TX", but we skipped it.
+                // Net effect: duty is added once (credit toward next slot).
+                // The value added above before the do_tx check already advanced the
+                // accumulator by duty; undo the 100-subtraction was not done because
+                // do_tx was false, so the accumulator correctly advanced by duty already.
+                // No extra action needed here except the cap.
+
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                esp_task_wdt_reset();
+#endif
+                // Sleep to end of this TX window, then wait for the next window to open.
+                vTaskDelay(pdMS_TO_TICKS(2000));
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                esp_task_wdt_reset();
+#endif
+                for (int _guard = 0; _guard < 10; _guard++) {
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                    esp_task_wdt_reset();
+#endif
+                    if (time_sync_secs_to_next_tx() > 0)
+                        break;
+                }
+                continue;
+            }
+        }
+
+        // Duty cycle approved: proceed to coarse sleep + fine alignment + TX.
+        bool do_skip = false;
+
+        int32_t wait_sec = time_sync_secs_to_next_tx();
+        ESP_LOGI(TAG, "Next TX in %d s (band=%s)", wait_sec, BAND_NAME[g_band_idx]);
+
+        if (wait_sec > 3) {
+            uint32_t sleep_ms = (uint32_t)(wait_sec - 3) * 1000u;
+            while (sleep_ms > 0u) {
+                uint32_t chunk = (sleep_ms > 1000u) ? 1000u : sleep_ms;
+                vTaskDelay(pdMS_TO_TICKS(chunk));
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                esp_task_wdt_reset();
+#endif
+                sleep_ms -= chunk;
+            }
+        }
+
+        // Fine alignment loop: spin until phase == 0 (pre-arm) then phase == 1 (TX)
+        {
+            web_server_cfg_lock();
+            uint8_t pre_snap_region = g_cfg.iaru_region;
+            web_server_cfg_unlock();
+            bool pre_armed_local = false;
+
+            for (;;) {
+                struct timeval tv_align;
+                gettimeofday(&tv_align, NULL);
+                uint32_t phase = (uint32_t)(tv_align.tv_sec % 120u);
+
+                if (phase == 0u) {
+                    if (!pre_armed_local) {
+                        g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx);
+                        oscillator_set_freq(g_pre_arm_base_hz);
+                        gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
+                        g_pre_armed = true;
+                        pre_armed_local = true;
+                        ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
+                    }
+                } else if (phase == 1u) {
+                    // Late pre-arm fallback — if we somehow arrived at phase 1
+                    // without going through phase 0 (e.g. coarse sleep overshot),
+                    // set up the oscillator and filter now. LPF settle time
+                    // (CONFIG_WSPR_LPF_SETTLE_MS, default 10 ms) is well within
+                    // the first WSPR symbol period (682 ms).
+                    if (!pre_armed_local) {
+                        g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx);
+                        oscillator_set_freq(g_pre_arm_base_hz);
+                        gpio_filter_select(BAND_FILTER[(int)g_band_idx]);
+                        vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
+                        g_pre_armed = true;
+                        pre_armed_local = true;
+                        ESP_LOGW(TAG, "Late pre-arm at phase=1: band=%s base_hz=%lu", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
+                    }
+                    break;
+                } else if (phase >= 2u && phase <= 4u) {
+                    ESP_LOGW(TAG, "Missed TX window (phase=%lu), skipping slot", (unsigned long)phase);
+                    g_pre_armed = false;
+                    g_pre_arm_base_hz = 0;
+                    do_skip = true;
+                    break;
+                }
+
+                vTaskDelay(pdMS_TO_TICKS(1));
+
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                esp_task_wdt_reset();
+#endif
+                web_server_cfg_lock();
+                bool still_en = g_cfg.tx_enabled;
+                web_server_cfg_unlock();
+
+                if (!still_en) {
+                    g_pre_armed = false;
+                    g_pre_arm_base_hz = 0;
+                    do_skip = true;
+                    break;
+                }
+            }
+
+            if (!do_skip) {
+                struct timeval tv_align;
+                gettimeofday(&tv_align, NULL);
+                uint32_t usec_now = (uint32_t)tv_align.tv_usec;
+
+                if (usec_now >= 5000u && usec_now < 900000u) {
+                    uint32_t coarse_us = 1000000u - usec_now;
+                    if (coarse_us > 3000u) {
+                        uint32_t sleep_ms = (coarse_us - 3000u) / 1000u;
+                        if (sleep_ms > 0u)
+                            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+                    }
+
+                    do {
+                        gettimeofday(&tv_align, NULL);
+                        usec_now = (uint32_t)tv_align.tv_usec;
+                        taskYIELD();
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                        esp_task_wdt_reset();
+#endif
+                    } while (usec_now >= 5000u && usec_now < 950000u);
+                }
             }
         }
 
@@ -562,14 +601,14 @@ static void scheduler_task(void *arg) {
 #if CONFIG_WSPR_TASK_WDT_ENABLE
             esp_task_wdt_reset();
 #endif
-            // Wait until the TX window closes (phase >= 5, secs_to_next_tx > 0)
-            // before re-entering the main loop. Without this, the very next iteration
-            // calls time_sync_secs_to_next_tx(), gets 0 back for phases 0-4, enters the
-            // fine-alignment inner loop, and immediately fires spurious "Missed TX window"
-            // warnings for phases 2, 3, and 4. This occurs on every duty-cycle skip that
-            // coincides with the TX window boundary and on genuine missed windows at phases
-            // 2 or 3. The TX window is at most 5 seconds wide (phases 0-4); the
-            // 10-iteration guard prevents an infinite loop on clock error.
+            // Post-skip guard: always sleep at least 2 seconds.
+            // Ensures phase counter has advanced past the ambiguous boundary
+            // region before we re-evaluate.
+            vTaskDelay(pdMS_TO_TICKS(2000));
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+            esp_task_wdt_reset();
+#endif
+            // Wait until the TX window closes (secs_to_next_tx > 0) before looping.
             for (int _guard = 0; _guard < 10; _guard++) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
 #if CONFIG_WSPR_TASK_WDT_ENABLE

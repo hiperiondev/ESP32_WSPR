@@ -204,8 +204,9 @@ esp_err_t config_load(wspr_config_t *cfg) {
     cfg->bands_changed = false;
     cfg->tx_slot_parity = 0;
 
-    ESP_LOGI(TAG, "Config loaded: cs=%s loc=%s pwr=%d dBm cal=%ld ppb region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb,
-             (int)cfg->iaru_region);
+    ESP_LOGI(TAG, "Config loaded:\n  Call Sign=%s\n  Locator=%s\n  TX Power=%d dBm\n  XTAL Calibration=%ld ppb\n  IARU Region=%d\n  Frequency hopping(%s):%usec",
+             cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb, (int)cfg->iaru_region, cfg->hop_enabled ? "enabled" : "disabled",
+             cfg->hop_interval_sec);
     return err;
 }
 

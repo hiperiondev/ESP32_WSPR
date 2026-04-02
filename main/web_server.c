@@ -281,7 +281,7 @@ static const char INDEX_HTML[] =
     "<div class='card'>"
     "<h2>&#127758; " WEBUI_CARD_IARU_TITLE "</h2>"
     "<label>" WEBUI_LABEL_IARU_REGION "</label>"
-    "<select id='iaru_region'>"
+    "<select id='iaru_region' onchange='sendLiveUpdate()'>"
     "<option value='1'>" WEBUI_IARU_REGION_1 "</option>"
     "<option value='2'>" WEBUI_IARU_REGION_2 "</option>"
     "<option value='3'>" WEBUI_IARU_REGION_3 "</option>"
@@ -296,11 +296,11 @@ static const char INDEX_HTML[] =
     "<div class='card'>"
     "<h2>&#128260; " WEBUI_CARD_HOP_TITLE "</h2>"
     "<div class='toggle'>"
-    "<label class='switch'><input type='checkbox' id='hop_en'><span class='slider'></span></label>"
+    "<label class='switch'><input type='checkbox' id='hop_en' onchange='sendLiveUpdate()'><span class='slider'></span></label>"
     "<span>" WEBUI_TOGGLE_HOP_LABEL "</span></div>"
     "<div class='hop-row'>"
     "<label style='margin:0;white-space:nowrap'>" WEBUI_LABEL_HOP_INTERVAL "</label>"
-    "<input id='hop_interval' type='number' min='120' max='86400' step='120' style='width:100px'>"
+    "<input id='hop_interval' type='number' min='120' max='86400' step='120' style='width:100px' onchange='sendLiveUpdate()'>"
     "</div>"
     "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>" WEBUI_HINT_HOP "</p>"
     "</div>"
@@ -314,7 +314,7 @@ static const char INDEX_HTML[] =
     "<h2>&#128202; " WEBUI_CARD_DUTY_TITLE "</h2>"
     "<label>" WEBUI_LABEL_DUTY "</label>"
     "<div class='row'>"
-    "<input id='tx_duty_pct' type='number' min='0' max='100' step='5' style='width:80px'>"
+    "<input id='tx_duty_pct' type='number' min='0' max='100' step='5' style='width:80px' onchange='sendLiveUpdate()'>"
     "<span style='color:var(--sub);font-size:.85em'>" WEBUI_HINT_DUTY_INLINE "</span>"
     "</div>"
     "<p style='color:var(--sub);font-size:.78em;margin-top:8px'>" WEBUI_HINT_DUTY "</p>"
@@ -369,6 +369,20 @@ static const char INDEX_HTML[] =
     // _settingsResetShown: ensures the factory-reset warning toast fires only once
     "let _settingsResetShown=false;"
 
+    // sendLiveUpdate sends bands/region/duty/hop to ESP32 immediately on UI change
+    "async function sendLiveUpdate(){"
+    "const bands=Array.from(document.querySelectorAll('#bands input')).map(i=>i.checked);"
+    "const body={"
+    "band_enabled:bands,"
+    "iaru_region:parseInt(document.getElementById('iaru_region').value)||1,"
+    "tx_duty_pct:parseInt(document.getElementById('tx_duty_pct').value)||20,"
+    "hop_enabled:document.getElementById('hop_en').checked,"
+    "hop_interval_sec:parseInt(document.getElementById('hop_interval').value)||120"
+    "};"
+    "try{await fetch('/api/live_update',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify(body)});}catch(e){}}"
+
     // Build the band checkbox grid dynamically from the BANDS array and enabled flags
     "function buildBands(enabled){"
     "const c=document.getElementById('bands');c.innerHTML='';"
@@ -376,6 +390,7 @@ static const char INDEX_HTML[] =
     "const d=document.createElement('label');"
     "d.className='band-cb';"
     "d.innerHTML=`<input type='checkbox' value='${i}' ${enabled[i]?'checked':''}>${b}`;"
+    "d.querySelector('input').addEventListener('change',sendLiveUpdate);" // immediate live update on band checkbox change
     "c.appendChild(d);});}"
 
     // Load current config from GET /api/config and populate all form fields
@@ -1222,6 +1237,139 @@ static esp_err_t h_reset(httpd_req_t *req) {
     return ESP_OK;
 }
 
+
+// handler for immediate live parameter updates from the web UI
+// Accepts POST /api/live_update with JSON containing any subset of:
+// band_enabled, iaru_region, tx_duty_pct, hop_enabled, hop_interval_sec.
+// Updates live config immediately WITHOUT saving to NVS and logs each change.
+static esp_err_t h_live_update(httpd_req_t *req) {
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
+    char buf[512] = {0};
+    int total = req->content_len;
+    if (total <= 0) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"ok\":true}", -1);
+        return ESP_OK;
+    }
+    if (total >= (int)sizeof(buf)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large");
+        return ESP_OK;
+    }
+    int received = 0;
+    while (received < total) {
+        int r = httpd_req_recv(req, buf + received, total - received);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT)
+                continue;
+            return ESP_FAIL;
+        }
+        received += r;
+    }
+    cJSON *j = cJSON_Parse(buf);
+    if (!j) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"ok\":false,\"err\":\"JSON parse error\"}", -1);
+        return ESP_OK;
+    }
+
+    web_server_cfg_lock();
+    cJSON *v;
+
+    // update IARU region immediately and log
+    if ((v = cJSON_GetObjectItem(j, "iaru_region")) && cJSON_IsNumber(v)) {
+        int region = v->valueint;
+        if (region < 1 || region > 3)
+            region = 1;
+        if ((uint8_t)region != _cfg->iaru_region) {
+            _cfg->iaru_region = (uint8_t)region;
+            ESP_LOGI(TAG, "LIVE UPDATE: iaru_region=%d", region);
+        }
+    }
+
+    // update TX duty cycle immediately and log
+    if ((v = cJSON_GetObjectItem(j, "tx_duty_pct")) && cJSON_IsNumber(v)) {
+        int pct = v->valueint;
+        if (pct < 0)
+            pct = 0;
+        if (pct > 100)
+            pct = 100;
+        if ((uint8_t)pct != _cfg->tx_duty_pct) {
+            _cfg->tx_duty_pct = (uint8_t)pct;
+            ESP_LOGI(TAG, "LIVE UPDATE: tx_duty_pct=%d%%", pct);
+        }
+    }
+
+    // update hop enable immediately and log
+    if ((v = cJSON_GetObjectItem(j, "hop_enabled")) && cJSON_IsBool(v)) {
+        bool hop = cJSON_IsTrue(v);
+        if (hop != _cfg->hop_enabled) {
+            _cfg->hop_enabled = hop;
+            ESP_LOGI(TAG, "LIVE UPDATE: hop_enabled=%s", hop ? "true" : "false");
+        }
+    }
+
+    // update hop interval immediately and log
+    if ((v = cJSON_GetObjectItem(j, "hop_interval_sec")) && cJSON_IsNumber(v)) {
+        uint32_t interval = (uint32_t)v->valueint;
+        if (interval < 120u)
+            interval = 120u;
+        if (interval > 86400u)
+            interval = 86400u;
+        if (interval != _cfg->hop_interval_sec) {
+            _cfg->hop_interval_sec = interval;
+            ESP_LOGI(TAG, "LIVE UPDATE: hop_interval_sec=%lu", (unsigned long)interval);
+        }
+    }
+
+    // update band_enabled array immediately and log active bands
+    cJSON *bands = cJSON_GetObjectItem(j, "band_enabled");
+    if (cJSON_IsArray(bands)) {
+        bool new_bands[BAND_COUNT];
+        memset(new_bands, 0, sizeof(new_bands));
+        int n = cJSON_GetArraySize(bands);
+        if (n > BAND_COUNT)
+            n = BAND_COUNT;
+        for (int i = 0; i < n; i++)
+            new_bands[i] = cJSON_IsTrue(cJSON_GetArrayItem(bands, i));
+        bool changed = false;
+        for (int i = 0; i < BAND_COUNT; i++) {
+            if (new_bands[i] != _cfg->band_enabled[i]) {
+                changed = true;
+                break;
+            }
+        }
+        if (changed) {
+            memcpy(_cfg->band_enabled, new_bands, sizeof(_cfg->band_enabled));
+            // Signal scheduler to rebuild active-band list
+            _cfg->bands_changed = true;
+            // Build comma-separated list of enabled band names for the log
+            char band_list[64] = {0};
+            int pos = 0;
+            for (int i = 0; i < BAND_COUNT && pos < (int)sizeof(band_list) - 8; i++) {
+                if (new_bands[i]) {
+                    if (pos > 0)
+                        band_list[pos++] = ',';
+                    int len = snprintf(band_list + pos, (int)sizeof(band_list) - pos, "%s", BAND_NAME[i]);
+                    if (len > 0)
+                        pos += len;
+                }
+            }
+            if (pos == 0)
+                strncpy(band_list, "none", sizeof(band_list) - 1);
+            ESP_LOGI(TAG, "LIVE UPDATE: band_enabled=[%s]", band_list);
+        }
+    }
+
+    web_server_cfg_unlock();
+    cJSON_Delete(j);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"ok\":true}", -1);
+    return ESP_OK;
+}
+
 esp_err_t web_server_start(wspr_config_t *cfg) {
     _cfg = cfg;
 
@@ -1262,9 +1410,10 @@ esp_err_t web_server_start(wspr_config_t *cfg) {
         { .uri = "/api/status", .method = HTTP_GET, .handler = h_status },
         { .uri = "/api/wifi_scan", .method = HTTP_GET, .handler = h_wifi_scan },
         { .uri = "/api/reset", .method = HTTP_POST, .handler = h_reset },
+        { .uri = "/api/live_update", .method = HTTP_POST, .handler = h_live_update },
     };
 
-    for (int i = 0; i < 7; i++)
+    for (int i = 0; i < 8; i++)
         httpd_register_uri_handler(_srv, &routes[i]);
 
     ESP_LOGI(TAG, "HTTP server started");
