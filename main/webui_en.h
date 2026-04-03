@@ -71,8 +71,8 @@
 #define WEBUI_STATUS_TX_LABEL   "Active TX"
 #define WEBUI_STATUS_SYM_LABEL  "Symbol"
 
-// WSPRnet link
-#define WEBUI_WSPR_LINK_TEXT "&#127760; View my spots on WSPRnet &#8599;"
+// PSKReporter map link
+#define WEBUI_WSPR_LINK_TEXT "&#127760; View my spots on PSKReporter &#8599;"
 
 // JS strings
 #define WEBUI_JS_BTN_TX_START     "Enable TX"
@@ -99,3 +99,8 @@
 
 // JS toast message when GPS locator fetch fails
 #define WEBUI_JS_GPS_LOC_ERR "GPS position not yet available"
+// Tone test button labels
+#define WEBUI_JS_BTN_TONE_START "Test Tone"
+#define WEBUI_JS_BTN_TONE_STOP  "Stop Tone"
+#define WEBUI_JS_TONE_FREQ_HINT "kHz"
+#define WEBUI_JS_TONE_FREQ_ERR  "Invalid frequency (0.1 to 30000 kHz)"

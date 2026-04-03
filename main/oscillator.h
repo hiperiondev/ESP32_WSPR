@@ -329,5 +329,14 @@ bool oscillator_hw_ok(void);
  */
 const char *oscillator_hw_name(void);
 
+// oscillator_cache_valid — returns true when the oscillator hardware
+// is correctly programmed for the last frequency set by oscillator_set_freq().
+// Returns false when oscillator_set_cal() has invalidated the Si5351 band cache
+// (meaning a new call to oscillator_set_freq() will recompute dividers).
+// Always returns true for AD9850 and DUMMY modes (no deferred cache state).
+// Called by the scheduler tone loop to force oscillator_set_freq() after a
+// calibration change even when the tone frequency itself has not changed.
+bool oscillator_cache_valid(void);
+
 /** @} */
 /** @} */

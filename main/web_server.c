@@ -109,6 +109,12 @@ static const char INDEX_HTML[] =
     "transition:.2s;font-size:.85em}"
     ".band-cb:hover{border-color:var(--accent)}"
     ".band-cb input{width:16px;height:16px;cursor:pointer;accent-color:var(--accent)}"
+    // override the generic label element rule so all band-cb boxes have
+    // the same margin (zero) and text color regardless of DOM position (first-child
+    // or not). Without this, label{margin-top:12px} applied to non-first band items
+    // while label:first-child set margin-top:0 only for 2200m, making it appear
+    // shorter than the others inside the CSS grid rows.
+    "label.band-cb{margin:0;color:var(--text)}"
     ".toggle{display:flex;align-items:center;gap:10px;margin-top:14px}"
     ".switch{position:relative;width:46px;height:26px;flex-shrink:0}"
     ".switch input{opacity:0;width:0;height:0}"
@@ -127,6 +133,21 @@ static const char INDEX_HTML[] =
     "border-radius:6px;cursor:pointer;transition:.2s}"
     ".btn-tx.on{background:var(--red);color:#fff}"
     ".btn-tx.off{background:var(--green);color:#000}"
+    // tone button light red (#fca5a5) when active, grey (#d1d5db) when idle
+    ".btn-tone{padding:10px 16px;font-size:.88em;font-weight:600;border:none;"
+    "border-radius:6px;cursor:pointer;transition:.2s;white-space:nowrap}"
+    ".btn-tone.on{background:#fca5a5;color:#7f1d1d}"
+    ".btn-tone.off{background:#d1d5db;color:#374151}"
+    // tone-ctrl-row places button and kHz input side-by-side in one row
+    ".tone-ctrl-row{display:flex;gap:8px;align-items:center;margin-top:10px}"
+    ".tone-ctrl-row input{width:100px;flex-shrink:0}"
+    // xtal-cal-row: ppb input + measured kHz input + Auto button in one line
+    ".xtal-cal-row{display:flex;gap:6px;align-items:center;margin-top:2px}"
+    ".xtal-cal-row input{flex-shrink:0}"
+    ".btn-auto{flex-shrink:0;padding:6px 12px;font-size:.82em;font-weight:700;"
+    "border-radius:6px;border:1px solid var(--accent);background:#eef2ff;"
+    "color:var(--accent);cursor:pointer;white-space:nowrap;transition:.2s}"
+    ".btn-auto:hover{background:#dde6ff}"
     ".status-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;"
     "padding:14px;margin-top:14px}"
     ".status-row{display:flex;justify-content:space-between;padding:4px 0;"
@@ -202,7 +223,16 @@ static const char INDEX_HTML[] =
     "<label>" WEBUI_LABEL_POWER "</label>"
     "<input id='power' type='number' min='0' max='60' step='3'>"
     "<label>" WEBUI_LABEL_XTAL_CAL "</label>"
-    "<input id='xtal_cal' type='number' min='-100000' max='100000' step='100'>"
+    // xtal-cal-row — ppb input (narrow) + measured kHz input + Auto button
+    // Auto button computes ppb = (measured_khz - nominal_khz)/nominal_khz*1e6
+    // positive ppb = crystal fast (output too high) -> firmware lowers VCO to compensate
+    "<div class='xtal-cal-row'>"
+    "<input id='xtal_cal' type='number' min='-200000' max='200000' step='100' style='width:110px'>"
+    "<input id='meas_freq' type='number' min='0.001' max='30000' step='0.001' "
+    "placeholder='kHz' style='width:100px' title='Measured tone frequency in kHz'>"
+    "<button class='btn-auto' onclick='autoCalibrate()' title='Auto-compute ppb from measured vs nominal tone frequency'>"
+    "Auto</button>"
+    "</div>"
     "<p style='color:var(--sub);font-size:.78em;margin-top:4px'>" WEBUI_HINT_XTAL_CAL "</p>"
     "<button class='btn-save' onclick='save()'>" WEBUI_BTN_SAVE "</button>"
     "</div>"
@@ -270,8 +300,16 @@ static const char INDEX_HTML[] =
     // ── TX control / live status card ─────────────────────────────────────────
     "<div class='card'>"
     "<h2>&#9889; " WEBUI_CARD_TX_TITLE "</h2>"
+    // TX enable button on its own row
     "<div class='toggle'>"
     "<button class='btn-tx off' id='tx_btn' onclick='toggleTx()'>" WEBUI_JS_BTN_TX_START "</button>"
+    "</div>"
+    // tone button + kHz input inline in one row (tone-ctrl-row)
+    "<div class='tone-ctrl-row'>"
+    "<button class='btn-tone off' id='tone_btn' onclick='toggleTone()'>" WEBUI_JS_BTN_TONE_START "</button>"
+    "<input id='tone_freq' type='number' min='0.1' max='30000' step='0.1' "
+    "placeholder='kHz' value='7040.1'>"
+    "<span style='color:var(--sub);font-size:.82em'>" WEBUI_JS_TONE_FREQ_HINT "</span>"
     "</div>"
     "<div class='status-box'>"
     "<div class='status-row'><span>" WEBUI_STATUS_HW_LABEL "</span><span id='s_hw'><span class='badge warn'>---</span></span></div>"
@@ -283,7 +321,8 @@ static const char INDEX_HTML[] =
     "<div class='status-row'><span>" WEBUI_STATUS_SYM_LABEL "</span><span id='s_sym'>---</span></div>"
     "</div>"
     "<div style='margin-top:12px;text-align:center'>"
-    "<a id='wspr_link' href='https://wsprnet.org' target='_blank' rel='noopener'"
+    // default href points to PSKReporter map (updated by loadCfg() with full URL)
+    "<a id='wspr_link' href='https://pskreporter.info/pskmap.html' target='_blank' rel='noopener'"
     " style='color:var(--accent);font-size:.85em;text-decoration:none'>" WEBUI_WSPR_LINK_TEXT "</a></div>"
     "</div>"
 
@@ -298,10 +337,42 @@ static const char INDEX_HTML[] =
     "let _passEdited=false;"
     "let _rebootInfoSet=false;"
     "let _settingsResetShown=false;"
+    // Compile-time string constants for the tone button labels
+    "const TONE_START='" WEBUI_JS_BTN_TONE_START "';"
+    "const TONE_STOP='" WEBUI_JS_BTN_TONE_STOP "';"
     // _gpsActive tracks whether a GPS module was detected at boot.
     // Initialised to false; set to true when /api/status returns gps_active=true.
     // Controls the enabled/disabled state and visual style of the GPS button.
     "let _gpsActive=false;"
+    // _toneFreqKhz stores the last known nominal tone frequency in kHz.
+    // Updated on every status poll from s.tone_freq_khz.
+    // Used by autoCalibrate() as the nominal reference frequency.
+    "let _toneFreqKhz=0;"
+
+    // convert a 4- or 6-character Maidenhead locator to the approximate
+    // center lat/lon (decimal degrees) used to set the PSKReporter map center.
+    // Algorithm follows the ITU/IARU Maidenhead spec:
+    //   field  : lon_adj/20, lat_adj/10     (letters A-R, 18 fields each)
+    //   square : digit0..1                  (digits 0-9 within the field)
+    //   subsq  : (lon%2)/2*24, (lat%1)*24   (letters A-X, 24 subsquares)
+    // The center of the selected square/subsquare is returned (+1 lon, +0.5 lat
+    // for 4-char; +1/24 lon, +0.5/24 lat for 6-char).
+    "function maidenToLatLon(loc){"
+    "if(!loc||loc.length<4)return{lat:'0.00',lon:'0.00'};"
+    "const u=loc.toUpperCase();"
+    "let lon=(u.charCodeAt(0)-65)*20-180;"
+    "let lat=(u.charCodeAt(1)-65)*10-90;"
+    "lon+=parseInt(u[2],10)*2;"
+    "lat+=parseInt(u[3],10);"
+    "if(loc.length>=6){"
+    // subsquare: each letter A-X divides 2-degree lon / 1-degree lat into 24 parts
+    "lon+=(u.charCodeAt(4)-65)*(2.0/24.0)+(1.0/24.0);"
+    "lat+=(u.charCodeAt(5)-65)*(1.0/24.0)+(0.5/24.0);"
+    "}else{"
+    // center of the 2-degree x 1-degree grid square
+    "lon+=1.0;lat+=0.5;"
+    "}"
+    "return{lat:lat.toFixed(2),lon:lon.toFixed(2)};}"
 
     "async function sendLiveUpdate(){"
     "const bands=Array.from(document.querySelectorAll('#bands input')).map(i=>i.checked);"
@@ -347,9 +418,14 @@ static const char INDEX_HTML[] =
     "buildBands(cfg.band_enabled||Array(12).fill(false));"
     "updateTxBtn(cfg.tx_enabled);"
     "const cs=(cfg.callsign||'').trim();"
+    // build PSKReporter map URL with callsign + lat/lon derived from
+    // the Maidenhead locator. Format:
+    //   https://pskreporter.info/pskmap.html#preset&callsign=CS&txrx=tx&mode=WSPR&mapCenter=LAT,LON
+    "const loc=(cfg.locator||'').trim();"
     "if(cs){"
-    "document.getElementById('wspr_link').href="
-    "'https://wsprnet.org/drupal/wsprnet/spots?callsign='+encodeURIComponent(cs);"
+    "const ll=maidenToLatLon(loc);"
+    "document.getElementById('wspr_link').href='https://pskreporter.info/"
+    "pskmap.html#preset&callsign='+encodeURIComponent(cs)+'&txrx=tx&mode=WSPR&mapCenter='+ll.lat+','+ll.lon;"
     "}"
     "}catch(e){toast('" WEBUI_JS_ERR_LOAD "'+e,'err');}}"
 
@@ -404,6 +480,97 @@ static const char INDEX_HTML[] =
     "const b=document.getElementById('tx_btn');"
     "b.textContent=on?'" WEBUI_JS_BTN_TX_STOP "':'" WEBUI_JS_BTN_TX_START "';"
     "b.className='btn-tx '+(on?'on':'off');}"
+
+    // updateToneBtn — syncs tone button visual state from poll or toggle response.
+    // active=true: light red background, stop label. active=false: grey, start label.
+    // freq parameter (optional) updates the kHz input when provided and non-zero.
+    "function updateToneBtn(active,freq){"
+    "const b=document.getElementById('tone_btn');"
+    "b.textContent=active?TONE_STOP:TONE_START;"
+    "b.className='btn-tone '+(active?'on':'off');"
+    "if(active&&freq&&freq>0){"
+    "document.getElementById('tone_freq').value=parseFloat(freq.toFixed(3));}}"
+
+    // autoCalibrate — computes ppb, saves it, then restarts the tone so the
+    // new calibration takes effect immediately without manual toggle off/on.
+    //
+    // Why restart is needed:
+    //   oscillator_set_cal() defers the update while _osc_tx_active is true (tone running).
+    //   Saving via /api/config calls oscillator_set_cal() but it is queued, not applied.
+    //   Stopping the tone calls oscillator_tx_end() which flushes the deferred cal.
+    //   Restarting the tone calls oscillator_set_freq() with the corrected VCO/FTW.
+    //   Result: corrected frequency is heard without any manual action by the user.
+    //
+    // Formula: ppb = round((measured_khz - nominal_khz) / nominal_khz * 1e6)
+    // positive ppb -> crystal fast (output too high) -> firmware lowers VCO/FTW
+    "async function autoCalibrate(){"
+    "const measInput=document.getElementById('meas_freq');"
+    "const calInput=document.getElementById('xtal_cal');"
+    "const meas=parseFloat(measInput.value);"
+    // validate measured frequency input
+    "if(isNaN(meas)||meas<=0){"
+    "toast('\\u274c Enter measured frequency in kHz first','err');return;}"
+    "const nom=_toneFreqKhz;"
+    // require tone test to be running so nominal frequency is known
+    "if(nom<=0){"
+    "toast('\\u274c Start Tone Test first so the nominal frequency is known','warn');return;}"
+    // ppb = (measured - nominal) / nominal * 1e6  (kHz units cancel)
+    // positive ppb = crystal fast (output above nominal) -> firmware lowers VCO
+    // negative ppb = crystal slow (output below nominal) -> firmware raises VCO
+    // firmware convention (oscillator.c si_cache_band): vco_cal = vco - corr when ppb>0
+    "const ppb=Math.round((meas-nom)/nom*1e9);"
+    // clamp to firmware limits +-100000 ppb
+    "const clamped=Math.max(-200000,Math.min(200000,ppb));"
+    "calInput.value=clamped;"
+    // check whether tone is currently active
+    "const toneOn=document.getElementById('tone_btn').classList.contains('on');"
+    "try{"
+    // save config with new ppb — calls oscillator_set_cal() server-side.
+    // if tone is running the cal is deferred inside firmware until tone stops.
+    "await fetch('/api/config',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({xtal_cal_ppb:clamped})});"
+    // if tone is active: stop it so oscillator_tx_end() flushes the deferred cal,
+    // then immediately restart at the same frequency — now uses corrected calibration.
+    "if(toneOn){"
+    "await fetch('/api/tone_toggle',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({active:false,freq_khz:nom})});"
+    // 350 ms pause (was 120 ms): the scheduler tone loop runs every
+    // 200 ms; 120 ms was not enough to guarantee the scheduler processed the stop
+    // before seeing the restart, leaving s_tone_was_active=true and tone_hz
+    // unchanged so oscillator_set_freq() was skipped and the cache was not rebuilt
+    // with the new calibration. 350 ms ensures the 200 ms loop has completed.
+    "await new Promise(r=>setTimeout(r,350));"
+    "const r2=await fetch('/api/tone_toggle',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({active:true,freq_khz:nom})});"
+    "const j2=await r2.json();"
+    "updateToneBtn(!!j2.tone_active,j2.freq_khz);"
+    "toast('\\u2705 Cal '+clamped+' ppb applied \\u2014 tone restarted at '+nom.toFixed(3)+' kHz','ok');"
+    "}else{"
+    "toast('\\u2705 XTAL cal set to '+clamped+' ppb \\u2014 start Tone Test to verify','ok');}"
+    "}catch(e){toast('\\u274c autoCalibrate error: '+e,'err');}}"
+
+    // toggleTone — sends POST /api/tone_toggle with freq_khz and active flag.
+    // Reads the kHz input, validates it, then toggles the active state derived from
+    // the current button class (.on = currently active -> will deactivate, else activate).
+    "async function toggleTone(){"
+    "const btn=document.getElementById('tone_btn');"
+    "const freqInput=document.getElementById('tone_freq');"
+    "const freqVal=parseFloat(freqInput.value);"
+    "if(isNaN(freqVal)||freqVal<0.1||freqVal>30000){"
+    "toast('\\u274c " WEBUI_JS_TONE_FREQ_ERR "','err');return;}"
+    // currently active means button has class 'on' -> clicking will stop tone
+    "const currentlyActive=btn.classList.contains('on');"
+    "const newActive=!currentlyActive;"
+    "try{"
+    "const r=await fetch('/api/tone_toggle',{method:'POST',"
+    "headers:{'Content-Type':'application/json'},"
+    "body:JSON.stringify({active:newActive,freq_khz:freqVal})});"
+    "const j=await r.json();"
+    "updateToneBtn(!!j.tone_active,j.freq_khz);"
+    "}catch(e){toast('Error: '+e,'err');}}"
 
     // updateGpsBtn — called from pollStatus() to enable or disable the GPS button.
     // When gpsOk is true the button gets the .gps-ok class (accent color, pointer cursor).
@@ -471,6 +638,10 @@ static const char INDEX_HTML[] =
     "`<span class='badge ok'>ON</span>`:`<span class='badge err'>OFF</span>`;"
     "document.getElementById('s_sym').textContent=s.tx_active?(s.symbol_idx+'/162'):'---';"
     "updateTxBtn(s.tx_enabled);"
+    // Sync tone button state from status response
+    // also store the nominal tone frequency for autoCalibrate()
+    "updateToneBtn(!!s.tone_active,s.tone_freq_khz);"
+    "if(s.tone_freq_khz&&s.tone_freq_khz>0)_toneFreqKhz=s.tone_freq_khz;"
     // update GPS button state from status poll.
     // gps_active is true when the time source is GPS (auto-detected at boot).
     "updateGpsBtn(!!s.gps_active);"
@@ -849,10 +1020,10 @@ static esp_err_t h_post_config(httpd_req_t *req) {
     }
     if ((v = cJSON_GetObjectItem(j, "xtal_cal_ppb")) && cJSON_IsNumber(v)) {
         int32_t ppb = (int32_t)v->valueint;
-        if (ppb < -100000)
-            ppb = -100000;
-        if (ppb > 100000)
-            ppb = 100000;
+        if (ppb < -200000)
+            ppb = -200000;
+        if (ppb > 200000)
+            ppb = 200000;
         _cfg->xtal_cal_ppb = ppb;
     }
     if ((v = cJSON_GetObjectItem(j, "iaru_region")) && cJSON_IsNumber(v)) {
@@ -913,6 +1084,61 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// handler: POST /api/tone_toggle
+// Activates or deactivates tone test mode.
+// Request body (JSON): {"freq_khz": <float 0.1-30000>, "active": <bool>}
+// Response (JSON): {"tone_active": <bool>, "freq_khz": <float>}
+// When active=true the scheduler immediately outputs a CW carrier at freq_khz
+// and suspends all WSPR scheduling until active=false is sent.
+static esp_err_t h_tone_toggle(httpd_req_t *req) {
+#if CONFIG_WSPR_HTTP_AUTH_ENABLE
+    if (!check_auth(req))
+        return send_auth_challenge(req);
+#endif
+    char buf[128] = { 0 };
+    int total = req->content_len;
+    if (total > 0 && total < (int)sizeof(buf)) {
+        int received = 0;
+        while (received < total) {
+            int r = httpd_req_recv(req, buf + received, total - received);
+            if (r <= 0) {
+                if (r == HTTPD_SOCK_ERR_TIMEOUT)
+                    continue;
+                return ESP_FAIL;
+            }
+            received += r;
+        }
+    }
+    bool new_active = false;
+    float new_freq = 7040.1f;
+    cJSON *j = cJSON_Parse(buf);
+    if (j) {
+        cJSON *v;
+        if ((v = cJSON_GetObjectItem(j, "active")) && cJSON_IsBool(v))
+            new_active = cJSON_IsTrue(v);
+        if ((v = cJSON_GetObjectItem(j, "freq_khz")) && cJSON_IsNumber(v))
+            new_freq = (float)v->valuedouble;
+        cJSON_Delete(j);
+    }
+    // Clamp to safe oscillator range
+    if (new_freq < 0.1f)
+        new_freq = 0.1f;
+    if (new_freq > 30000.0f)
+        new_freq = 30000.0f;
+    web_server_cfg_lock();
+    _cfg->tone_active = new_active;
+    _cfg->tone_freq_khz = new_freq;
+    web_server_cfg_unlock();
+    ESP_LOGI(TAG, "Tone toggle: active=%s freq=%.3f kHz", new_active ? "ON" : "OFF", (double)new_freq);
+    char freq_str[24];
+    snprintf(freq_str, sizeof(freq_str), "%.3f", (double)new_freq);
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"tone_active\":%s,\"freq_khz\":%s}", new_active ? "true" : "false", freq_str);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, strlen(resp));
+    return ESP_OK;
+}
+
 // h_status — adds "gps_active" boolean field to the status JSON response.
 // gps_active is true when the time source selected at boot is GPS (not NTP).
 // The JS uses this flag to enable/disable the "From GPS" locator button.
@@ -945,6 +1171,15 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON_AddStringToObject(j, "reboot_reason", snap.reboot_reason);
     cJSON_AddBoolToObject(j, "settings_reset", config_was_reset());
     cJSON_AddBoolToObject(j, "gps_active", time_sync_source() == TIME_SYNC_GPS);
+    // Add tone test mode fields so the UI can sync the button state
+    web_server_cfg_lock();
+    bool tone_active_snap = _cfg ? _cfg->tone_active : false;
+    float tone_freq_snap = _cfg ? _cfg->tone_freq_khz : 0.0f;
+    web_server_cfg_unlock();
+    cJSON_AddBoolToObject(j, "tone_active", tone_active_snap);
+    char _tone_freq_str[24];
+    snprintf(_tone_freq_str, sizeof(_tone_freq_str), "%.3f", (double)tone_freq_snap);
+    cJSON_AddRawToObject(j, "tone_freq_khz", _tone_freq_str);
     char *s = cJSON_PrintUnformatted(j);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, s, strlen(s));
@@ -1174,7 +1409,7 @@ esp_err_t web_server_start(wspr_config_t *cfg) {
     }
 
     httpd_config_t hcfg = HTTPD_DEFAULT_CONFIG();
-    hcfg.max_uri_handlers = 12;
+    hcfg.max_uri_handlers = 13; // +1 for /api/tone_toggle
     hcfg.stack_size = 8192;
     if (httpd_start(&_srv, &hcfg) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
@@ -1191,8 +1426,11 @@ esp_err_t web_server_start(wspr_config_t *cfg) {
         { .uri = "/api/reset", .method = HTTP_POST, .handler = h_reset },
         { .uri = "/api/live_update", .method = HTTP_POST, .handler = h_live_update },
         { .uri = "/api/gps_loc", .method = HTTP_GET, .handler = h_gps_loc },
+        // Tone test endpoint
+        { .uri = "/api/tone_toggle", .method = HTTP_POST, .handler = h_tone_toggle },
     };
-    for (int i = 0; i < 9; i++)
+    // Use sizeof to avoid hardcoding route count
+    for (int i = 0; i < (int)(sizeof(routes) / sizeof(routes[0])); i++)
         httpd_register_uri_handler(_srv, &routes[i]);
     ESP_LOGI(TAG, "HTTP server started");
     return ESP_OK;

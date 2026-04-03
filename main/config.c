@@ -127,6 +127,8 @@ void config_defaults(wspr_config_t *cfg) {
     // Runtime-only flags: not stored in NVS, always reset to clean state
     cfg->bands_changed = false;
     cfg->tx_slot_parity = 0;
+    cfg->tone_active = false;
+    cfg->tone_freq_khz = 0.0f;
 }
 
 esp_err_t config_init(void) {
@@ -203,8 +205,11 @@ esp_err_t config_load(wspr_config_t *cfg) {
     // Runtime-only fields: always start fresh, do not persist across reboots
     cfg->bands_changed = false;
     cfg->tx_slot_parity = 0;
+    cfg->tone_active = false;
+    cfg->tone_freq_khz = 0.0f;
 
-    ESP_LOGI(TAG, "Config loaded:\n  Call Sign=%s\n  Locator=%s\n  TX Power=%d dBm\n  XTAL Calibration=%ld ppb\n  IARU Region=%d\n  Frequency hopping(%s):%usec",
+    ESP_LOGI(TAG,
+             "Config loaded:\n  Call Sign=%s\n  Locator=%s\n  TX Power=%d dBm\n  XTAL Calibration=%ld ppb\n  IARU Region=%d\n  Frequency hopping(%s):%usec",
              cfg->callsign, cfg->locator, cfg->power_dbm, (long)cfg->xtal_cal_ppb, (int)cfg->iaru_region, cfg->hop_enabled ? "enabled" : "disabled",
              cfg->hop_interval_sec);
     return err;

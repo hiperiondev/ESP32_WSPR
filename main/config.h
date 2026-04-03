@@ -70,9 +70,9 @@
  *
  * Increment this constant whenever the layout or semantics of @ref wspr_config_t
  * change in a way that would make an old blob incompatible with the new firmware.
- * The current value is @c 5.
+ * The current value is @c 6.
  */
-#define CONFIG_SCHEMA_VERSION 5u
+#define CONFIG_SCHEMA_VERSION 6u
 
 /** @} */
 
@@ -467,6 +467,13 @@ typedef struct {
      * because receiving stations decode both message types independently.
      */
     uint8_t tx_slot_parity;
+
+    // Tone test mode: runtime-only, never persisted across reboots.
+    // tone_active: when true the scheduler outputs a CW carrier at tone_freq_khz
+    // instead of executing the normal WSPR schedule.
+    bool tone_active;
+    // tone_freq_khz: carrier frequency for tone test in kHz (0.1 to 30000.0).
+    float tone_freq_khz;
 } wspr_config_t;
 
 /** @} */

@@ -441,6 +441,45 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     if (pll_b_base >= pll_c)
         pll_b_base = pll_c - 1u;
 
+    // Apply crystal calibration (ppb) directly to pll_b_base.
+    // The vco_cal trick above only shifts d_int when ppb is large enough to move
+    // the floor-division boundary. For small ppb (e.g. 115 ppb at 28 MHz the VCO
+    // shifts by only 100 Hz; floor(874999900/28000000)=31 same as uncal -> d_int
+    // stays 30, vco_target and pll_b_base are identical to the uncalibrated case,
+    // and the crystal error is never corrected).
+    // Directly adjust pll_b_base to account for the actual xtal offset.
+    // If the crystal runs fast by ppb, the PLL ratio must be reduced by the same
+    // fraction so that the VCO (and hence the output) reaches the target:
+    //   delta_b = (pll_a*pll_c + pll_b_base) * ppb_abs / 1e9
+    // 32-bit safe split arithmetic (all intermediates < 2^32):
+    //   pll_total <= 90*1048575+1048574 = 95,371,324
+    //   pt_q = pll_total/1000 <= 95,371
+    //   ppb_q = ppb_abs/1000 <= 100 (ppb clamped to +-100000)
+    //   pt_q * ppb_q <= 9,537,100 -- fits uint32_t comfortably
+    if (_si_cal != 0) {
+        uint32_t ppb_abs2 = (_si_cal >= 0) ? (uint32_t)_si_cal : (uint32_t)(-(int32_t)_si_cal);
+        uint32_t pll_total = pll_a * pll_c + pll_b_base;
+        uint32_t pt_q = pll_total / 1000u;
+        uint32_t pt_r = pll_total % 1000u;
+        uint32_t ppb_q2 = ppb_abs2 / 1000u;
+        uint32_t ppb_r2 = ppb_abs2 % 1000u;
+        // Three-term split keeps every intermediate within uint32_t range
+        uint32_t delta_b = pt_q * ppb_q2 / 1000u + pt_q * ppb_r2 / 1000000u + pt_r * ppb_q2 / 1000000u;
+        if (_si_cal > 0) {
+            // Crystal runs fast: lower pll_b to reduce effective VCO
+            if (delta_b < pll_b_base)
+                pll_b_base -= delta_b;
+            else
+                pll_b_base = 0u;
+        } else {
+            // Crystal runs slow: raise pll_b to increase effective VCO
+            pll_b_base += delta_b;
+            if (pll_b_base >= pll_c)
+                pll_b_base = pll_c - 1u;
+        }
+        ESP_LOGD(TAG, "SI5351 cal: ppb=%ld delta_b=%lu pll_b_base_cal=%lu", (long)_si_cal, (unsigned long)delta_b, (unsigned long)pll_b_base);
+    }
+
     // Pre-compute the b-increment per milli-Hz of tone offset.
     // delta_b = d_int * pll_c / xtal_Hz  (per Hz).
     // Decomposed into integer parts to stay in 32-bit arithmetic at runtime:
@@ -489,17 +528,23 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     if (err != ESP_OK)
         return err;
 
-    // Only reset PLLA when the integer multiplier changed (VCO changed).
-    // Skipping the reset when pll_a is unchanged avoids a ~200 µs output glitch
-    // caused by the PLL momentarily losing lock during the re-lock sequence.
-    // When pll_a does change (band hop or first use), reset and wait for PLL to
-    // re-lock (Si5351A: typ 100 µs, allow one FreeRTOS tick = 1 ms margin).
-    // This adds <1 ms to band-change setup time, not to per-symbol timing.
-    if (pll_a != _si_last_pll_a) {
+    // Reset PLLA whenever the target frequency actually changed.
+    // The previous condition only checked pll_a (integer multiplier), which
+    // is the same for many HF bands sharing a 25/27 MHz crystal (e.g. 20m,
+    // 17m, 15m all map to pll_a=35 with a 25 MHz xtal). When toggling between
+    // the WSPR pre-arm frequency and the tone-test frequency, both may share
+    // the same pll_a while having different pll_b_base/pll_c values.  Without
+    // a PLL reset after a fractional-part change the Si5351 does not reliably
+    // re-lock, causing intermittent wrong-frequency or no output after 2-3
+    // tone-test start/stop cycles.
+    // Also reset when freq_hz changed from the last cached frequency.
+    // si_apply_tone() still updates only the fractional numerator within a
+    // single WSPR window (162 symbols, same base freq) — no reset there.
+    if (pll_a != _si_last_pll_a || freq_hz != _si_last_set_hz) {
         err = si_write(SI5351_PLL_RESET, 0x20);
         if (err != ESP_OK)
             return err;
-        // Wait for PLL re-lock before returning to the caller
+        // Wait for PLL re-lock (Si5351A: typ 100 us, 1 FreeRTOS tick = 1 ms)
         vTaskDelay(1);
         _si_last_pll_a = pll_a;
     }
@@ -1035,4 +1080,20 @@ const char *oscillator_hw_name(void) {
         default:
             return "None (DUMMY)";
     }
+}
+// Oscillator_cache_valid — new public function.
+// Returns true when the oscillator hardware is correctly programmed for the
+// last frequency set by oscillator_set_freq(). Returns false after
+// oscillator_set_cal() invalidates the Si5351 band cache, meaning the next
+// call to oscillator_set_freq() MUST recompute the full divider chain.
+// For AD9850 and DUMMY modes the FTW constants are updated inline inside
+// oscillator_set_cal(), so there is no deferred cache state; always true.
+// Used by the scheduler tone loop to detect a cal-change while tone is active
+// and force oscillator_set_freq() even when the frequency has not changed.
+bool oscillator_cache_valid(void) {
+    if (_osc_type == OSC_SI5351) {
+        return _si_cache.valid;
+    }
+    // AD9850 and DUMMY: no band cache, always considered valid
+    return true;
 }

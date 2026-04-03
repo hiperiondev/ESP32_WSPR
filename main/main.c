@@ -53,6 +53,24 @@ static inline uint32_t timer_us32(void) {
 // arithmetic without accumulated floating-point error across 162 symbols.
 #define WSPR_PERIOD_3X_US 2048000UL // 3 x exact symbol period in microseconds
 
+// Map an arbitrary frequency in Hz to the best hardware LPF filter ID.
+// Compares against all Region 1 WSPR band dial frequencies and returns the
+// BAND_FILTER address for the closest band. Used by tone test mode to select
+// the appropriate low-pass filter for the user-specified test frequency.
+static uint8_t freq_to_filter(uint32_t freq_hz) {
+    uint32_t min_diff = UINT32_MAX;
+    int best_band = BAND_40M;
+    for (int i = 0; i < BAND_COUNT; i++) {
+        uint32_t bf = BAND_FREQ_HZ[0][i];
+        uint32_t diff = (freq_hz >= bf) ? (freq_hz - bf) : (bf - freq_hz);
+        if (diff < min_diff) {
+            min_diff = diff;
+            best_band = i;
+        }
+    }
+    return BAND_FILTER[best_band];
+}
+
 // Global live config — shared between scheduler, status and web-server tasks
 static wspr_config_t g_cfg;
 // Uptime in seconds at boot, used to compute the boot wall-clock time after NTP sync
@@ -227,6 +245,18 @@ static void wspr_transmit(void) {
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;
 
+        // check tone_active on every symbol (was every 10 = ~6.8 s gap).
+        // One cfg_mutex lock per symbol (every ~683 ms) is negligible overhead.
+        {
+            web_server_cfg_lock();
+            bool tone_abort = g_cfg.tone_active;
+            web_server_cfg_unlock();
+            if (tone_abort) {
+                ESP_LOGW(TAG, "WSPR TX aborted at symbol %d: tone test activated", i);
+                break;
+            }
+        }
+
 #if CONFIG_WSPR_TASK_WDT_ENABLE
         esp_task_wdt_reset();
 #endif
@@ -350,8 +380,72 @@ static void scheduler_task(void *arg) {
     uint8_t s_prev_duty = 0u;
 
     bool time_synced_logged = false;
+    //  Tone test mode: tracks oscillator state across loop iterations
+    bool s_tone_was_active = false;
+    uint32_t s_tone_last_hz = 0u;
 
     while (1) {
+        // Tone test mode: takes priority over all WSPR scheduling.
+        // When active the scheduler outputs a CW carrier at the requested frequency
+        // and bypasses time-sync gating, duty-cycle, band-hopping, and TX.
+        {
+            web_server_cfg_lock();
+            bool tone_snap = g_cfg.tone_active;
+            float tone_freq_snap = g_cfg.tone_freq_khz;
+            web_server_cfg_unlock();
+            if (tone_snap) {
+                uint32_t tone_hz = (uint32_t)(tone_freq_snap * 1000.0f);
+                // Also reprogram when oscillator cache was invalidated by
+                // oscillator_set_cal() while the tone was already running.
+                // Without this check, saving a new xtal_cal_ppb via the web UI while
+                // tone is active causes oscillator_set_cal() to clear _si_cache.valid
+                // and reset _si_last_set_hz to 0, but the tone loop never calls
+                // oscillator_set_freq() again because s_tone_was_active is true and
+                // tone_hz == s_tone_last_hz, so the calibration has no effect on the
+                // running tone output. Detected via oscillator_cache_valid() which
+                // returns false whenever the Si5351 band cache has been invalidated.
+                bool _cache_invalid = s_tone_was_active && !oscillator_cache_valid();
+                if (!s_tone_was_active || tone_hz != s_tone_last_hz || _cache_invalid) {
+                    // First entry into tone mode, frequency changed, or cal updated: reprogram
+                    s_tone_last_hz = tone_hz;
+                    uint8_t tone_filter = freq_to_filter(tone_hz);
+                    gpio_filter_select(tone_filter);
+                    vTaskDelay(pdMS_TO_TICKS(CONFIG_WSPR_LPF_SETTLE_MS));
+                    oscillator_set_freq(tone_hz);
+                    oscillator_enable(true);
+                    g_tx_active = true;
+                    if (!s_tone_was_active) {
+                        ESP_LOGI(TAG, "Tone test activated: %.3f kHz (%lu Hz) filter=%u", (double)tone_freq_snap, (unsigned long)tone_hz,
+                                 (unsigned)tone_filter);
+                    } else {
+                        ESP_LOGI(TAG, "Tone frequency updated: %.3f kHz", (double)tone_freq_snap);
+                    }
+                    s_tone_was_active = true;
+                    if (_cache_invalid) {
+                        ESP_LOGI(TAG, "Tone cal update applied: %.3f kHz reprogrammed with new calibration", (double)tone_freq_snap);
+                    }
+                }
+                // reset the task watchdog every tone-loop iteration.
+                // vTaskDelay yields to the OS but does NOT count as a WDT reset
+                // for wspr_sched; without this the WDT fires after ~5 s of tone mode.
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                esp_task_wdt_reset();
+#endif
+                vTaskDelay(pdMS_TO_TICKS(200));
+                continue;
+            }
+            // Tone mode was active but is now deactivated: restore idle state
+            if (s_tone_was_active) {
+                oscillator_enable(false);
+                g_tx_active = false;
+                s_tone_was_active = false;
+                s_tone_last_hz = 0u;
+                g_pre_armed = false;
+                g_pre_arm_base_hz = 0;
+                ESP_LOGI(TAG, "Tone test deactivated, resuming normal WSPR scheduling");
+            }
+        }
+
         // Gate on time sync: WSPR transmissions require UTC accuracy within +-1 s
         if (!time_sync_is_ready()) {
 #if CONFIG_WSPR_TASK_WDT_ENABLE
@@ -475,19 +569,38 @@ static void scheduler_task(void *arg) {
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                 esp_task_wdt_reset();
 #endif
-                // Sleep to end of this TX window, then wait for the next window to open.
-                vTaskDelay(pdMS_TO_TICKS(2000));
+                // sleep in 100 ms chunks checking tone_active so tone
+                // test can start within ~100 ms instead of waiting up to 12 s.
+                {
+                    uint32_t duty_guard_ms = 2000u;
+                    while (duty_guard_ms > 0u) {
+                        uint32_t chunk = (duty_guard_ms > 100u) ? 100u : duty_guard_ms;
+                        vTaskDelay(pdMS_TO_TICKS(chunk));
+                        duty_guard_ms -= chunk;
 #if CONFIG_WSPR_TASK_WDT_ENABLE
-                esp_task_wdt_reset();
+                        esp_task_wdt_reset();
 #endif
+                        web_server_cfg_lock();
+                        bool tone_duty_chk = g_cfg.tone_active;
+                        web_server_cfg_unlock();
+                        if (tone_duty_chk)
+                            goto duty_skip_done;
+                    }
+                }
                 for (int _guard = 0; _guard < 10; _guard++) {
-                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    vTaskDelay(pdMS_TO_TICKS(100));
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                     esp_task_wdt_reset();
 #endif
+                    web_server_cfg_lock();
+                    bool tone_duty_g = g_cfg.tone_active;
+                    web_server_cfg_unlock();
+                    if (tone_duty_g)
+                        goto duty_skip_done;
                     if (time_sync_secs_to_next_tx() > 0)
                         break;
                 }
+            duty_skip_done:
                 continue;
             }
         }
@@ -501,12 +614,20 @@ static void scheduler_task(void *arg) {
         if (wait_sec > 3) {
             uint32_t sleep_ms = (uint32_t)(wait_sec - 3) * 1000u;
             while (sleep_ms > 0u) {
-                uint32_t chunk = (sleep_ms > 1000u) ? 1000u : sleep_ms;
+                uint32_t chunk = (sleep_ms > 200u) ? 200u : sleep_ms;
                 vTaskDelay(pdMS_TO_TICKS(chunk));
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                 esp_task_wdt_reset();
 #endif
                 sleep_ms -= chunk;
+                // check tone_active in the coarse sleep so tone test
+                // starts within ~200 ms even when the next TX is minutes away.
+                web_server_cfg_lock();
+                bool tone_coarse = g_cfg.tone_active;
+                web_server_cfg_unlock();
+                if (tone_coarse) {
+                    sleep_ms = 0u; // break out of sleep; tone loop at top will handle it
+                }
             }
         }
 
@@ -562,9 +683,10 @@ static void scheduler_task(void *arg) {
 #endif
                 web_server_cfg_lock();
                 bool still_en = g_cfg.tx_enabled;
+                bool tone_req = g_cfg.tone_active; // abort alignment if tone activated
                 web_server_cfg_unlock();
 
-                if (!still_en) {
+                if (!still_en || tone_req) {
                     g_pre_armed = false;
                     g_pre_arm_base_hz = 0;
                     do_skip = true;
@@ -604,19 +726,43 @@ static void scheduler_task(void *arg) {
             // Post-skip guard: always sleep at least 2 seconds.
             // Ensures phase counter has advanced past the ambiguous boundary
             // region before we re-evaluate.
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            // each 100 ms chunk checks tone_active so tone test
+            // starts within ~100 ms instead of waiting up to 12 s for the
+            // full guard to expire. Without this, activating tone while the
+            // scheduler was in the post-skip delay caused intermittent
+            // "tone button active but no output" behaviour.
+            {
+                uint32_t guard_ms = 2000u;
+                while (guard_ms > 0u) {
+                    uint32_t chunk = (guard_ms > 100u) ? 100u : guard_ms;
+                    vTaskDelay(pdMS_TO_TICKS(chunk));
+                    guard_ms -= chunk;
 #if CONFIG_WSPR_TASK_WDT_ENABLE
-            esp_task_wdt_reset();
+                    esp_task_wdt_reset();
 #endif
+                    web_server_cfg_lock();
+                    bool tone_skip_check = g_cfg.tone_active;
+                    web_server_cfg_unlock();
+                    if (tone_skip_check)
+                        goto skip_post_guard;
+                }
+            }
             // Wait until the TX window closes (secs_to_next_tx > 0) before looping.
             for (int _guard = 0; _guard < 10; _guard++) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
+                vTaskDelay(pdMS_TO_TICKS(100));
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                 esp_task_wdt_reset();
 #endif
+                web_server_cfg_lock();
+                bool tone_guard_check = g_cfg.tone_active;
+                web_server_cfg_unlock();
+                if (tone_guard_check)
+                    goto skip_post_guard;
+                // break once we are past the current TX window
                 if (time_sync_secs_to_next_tx() > 0)
                     break;
             }
+        skip_post_guard:
             continue;
         }
 

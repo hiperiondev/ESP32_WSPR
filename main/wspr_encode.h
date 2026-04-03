@@ -73,9 +73,6 @@
  * @{
  */
 
-// MODIFIED: replaced Doxygen block comments with // style throughout; added clarifying
-// note for WSPR_MSG_TYPE_3 to document that the primary TX is still Type-1, not Type-3.
-
 // WSPR message type returned by wspr_encode_type() for a given callsign+locator pair.
 // Callers must inspect this value to decide whether a companion Type-3 slot is needed.
 typedef enum {
