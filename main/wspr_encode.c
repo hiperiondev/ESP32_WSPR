@@ -2,7 +2,7 @@
  * @file wspr_encode.c
  * @author Emiliano Augusto Gonzalez
  * @copyright Copyright (c) 2026 Emiliano Augusto Gonzalez (lu3vea@gmail.com)
- * @brief EWSPR message encoder — Type-1, Type-2, and Type-3 messages.
+ * @brief WSPR message encoder — Type-1, Type-2, and Type-3 messages.
  * @see https://github.com/hiperiondev/ESP32_WSPR
  *
  * @license GNU General Public License v3.0
