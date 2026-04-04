@@ -128,11 +128,12 @@ esp_err_t oscillator_init(void);
  *
  * In dummy mode the call is a no-op and @c ESP_OK is returned.
  *
- * @param[in] freq_hz  Desired output frequency in Hz.  For the WSPR bands
- *                     this is the dial frequency + 1 500 Hz audio centre
- *                     offset, e.g. 14 098 600 Hz for 20 m.
- *                     Practical range: 137 600 Hz (2200 m dial + 1500 Hz)
- *                     to 28 127 600 Hz (10 m dial + 1500 Hz).
+ * @param[in] freq_hz  Desired output frequency in Hz.  For WSPR bands, pass
+ *                     config_band_freq_hz() directly -- BAND_FREQ_HZ already
+ *                     stores the RF center frequency (= SSB dial + 1500 Hz).
+ *                     Example: 20 m -> 14 097 100 Hz, 10 m -> 28 126 100 Hz.
+ *                     Practical range: 137 600 Hz (2200 m) to 28 126 100 Hz (10 m).
+ *                     Do NOT add another 1500 Hz on top of config_band_freq_hz().
  *
  * @return @c ESP_OK on success.
  * @return @c ESP_ERR_INVALID_ARG if the Si5351A output divider or PLL

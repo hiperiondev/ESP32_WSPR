@@ -35,6 +35,8 @@ static volatile bool _osc_tx_active = false; // true during a WSPR symbol loop
 // Deferred calibration: stores a ppb value received while TX is in progress
 static bool _cal_pending = false;
 static int32_t _cal_pending_ppb = 0;
+// Tracks Si5351 CLK0 output state for PLL-reset muting in si_cache_band.
+static bool _si_output_enabled = false;
 
 // =============================================================================
 //  SI5351 Driver
@@ -76,8 +78,11 @@ static int32_t _cal_pending_ppb = 0;
 #else
 #define SI5351_IDRV 0x03u // 8 mA ~ +13 dBm into 50 Ω (default)
 #endif
-// Complete CLK0 control byte: PLLA source (bits 3:2) | drive current (bits 1:0)
-#define SI5351_CLK0_CTRL_VAL (0x0Cu | SI5351_IDRV)
+// AN619 requires both reg16 bit6
+// AND reg44 bit6 for true integer mode. Without bit6 of reg16 the Si5351 CLK0
+// operates with higher phase noise (~20 dB worse), preventing WSPR decodes.
+// 0x4C=0100 1100: bit6=MS0_INT,bit5=PLLA,bit4=not-inv,bits3:2=MS0,bits1:0=idrv
+#define SI5351_CLK0_CTRL_VAL (0x4Cu | SI5351_IDRV)
 
 // Crystal frequency and runtime state for the Si5351 driver
 static uint32_t _si_xtal = (uint32_t)CONFIG_SI5351_XTAL_FREQ;
@@ -190,6 +195,7 @@ typedef struct {
     uint32_t pll_a;      // PLL integer multiplier: VCO = xtal * (a + b/c)
     uint32_t pll_c;      // PLL fractional denominator (1048575 for max resolution)
     uint32_t pll_b_base; // PLL fractional numerator for tone offset = 0 mHz
+    uint32_t raw_num;    // d_int * pll_c, stored for accurate delta_b in si_apply_tone
     // 3-term decomposition of delta_b per mHz
     uint32_t b_step_int;  // floor(raw_num / full_den), e.g. 2 for 20m@25MHz (d_int=62)
     uint32_t b_step2_int; // floor((raw_num % full_den) / xtal_kHz), e.g. 600 for 20m@25MHz
@@ -490,6 +496,8 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     uint32_t xtal_kHz = _si_xtal / 1000UL;
     uint32_t full_den = xtal_kHz * 1000UL; // = xtal_Hz
     uint32_t raw_num = d_int * pll_c;
+    // FIXED: store raw_num in cache for use by si_apply_tone
+    _si_cache.raw_num = raw_num;
     uint32_t b_step_int = raw_num / full_den;
     uint32_t b_step_rem1 = raw_num % full_den;
     uint32_t b_step2_int = b_step_rem1 / xtal_kHz;
@@ -541,11 +549,19 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     // si_apply_tone() still updates only the fractional numerator within a
     // single WSPR window (162 symbols, same base freq) — no reset there.
     if (pll_a != _si_last_pll_a || freq_hz != _si_last_set_hz) {
+        // Mute CLK0 before PLL reset to eliminate spurious tone.
+        if (_si_output_enabled) {
+            si_write(SI5351_OUTPUT_EN, 0xFF);
+        }
         err = si_write(SI5351_PLL_RESET, 0x20);
         if (err != ESP_OK)
             return err;
-        // Wait for PLL re-lock (Si5351A: typ 100 us, 1 FreeRTOS tick = 1 ms)
-        vTaskDelay(1);
+        // 15 ms guaranteed PLL lock (was 1 tick = 0-1 ms, unreliable).
+        vTaskDelay(pdMS_TO_TICKS(15));
+        // Restore CLK0 after confirmed PLL lock.
+        if (_si_output_enabled) {
+            si_write(SI5351_OUTPUT_EN, 0xFE);
+        };
         _si_last_pll_a = pll_a;
     }
     return ESP_OK;
@@ -577,29 +593,24 @@ static esp_err_t si_apply_tone(uint32_t tone_millihz) {
     // Scale the milli-Hz offset to account for the R-divider
     uint32_t scaled_tone = tone_millihz << _si_cache.r_div_reg;
 
-    // Compute delta_b using the 3-term decomposition to stay within 32-bit arithmetic
-    uint32_t delta_b = scaled_tone * _si_cache.b_step_int;
-    delta_b += (scaled_tone * _si_cache.b_step2_int) / 1000UL;
-    // Split using xtal_kHz as intermediate divisor to keep both
-    // intermediates within uint32_t range:
-    //   q = scaled_tone / xtal_kHz  (max ~22, safe)
-    //   r = scaled_tone % xtal_kHz  (max 26999, safe)
-    //   (q * b_step2_rem) / 1000    (max 22*26999/1000=593, safe)
-    //   (r * b_step2_rem) / full_den (max 26999*26999/27e6=26, intermediate 728M, safe)
-    {
-        uint32_t xkHz = _si_cache.xtal_kHz;   // e.g. 25000 or 27000
-        uint32_t rem = _si_cache.b_step2_rem; // < xtal_kHz, max 26999
-        uint32_t den = _si_cache.full_den;    // = xtal_Hz (25e6 or 27e6)
-        uint32_t q = scaled_tone / xkHz;      // <= 562560/25000 = 22, fits uint32_t
-        uint32_t r = scaled_tone % xkHz;      // < 27000, fits uint32_t
-        // q*rem <= 22*26999 = 593,978 -> /1000 = 593 (safe, no overflow)
-        // r*rem <= 26999*26999 = 728,946,001 < 2^30 (safe, fits uint32_t)
-        delta_b += (q * rem) / 1000UL;
-        delta_b += (r * rem) / den;
-    }
+    // [MODIFIED] Compute delta_b with the correct mHz-to-Hz conversion.
+    // Derivation: delta_b = tone_Hz * d_int * pll_c * 2^r / xtal_Hz
+    //                     = (tone_mHz / 1000) * raw_num / full_den
+    // Implemented by multiplying the denominator by 1000 to avoid losing
+    // precision. Without * 1000, tone_millihz is treated as Hz, producing
+    // delta_b 1000x too large: tones 1-3 clamp to pll_c-1, jumping ~16 kHz
+    // off-frequency on every non-zero symbol -- all WSPR frames undecodable.
+    // Overflow check: den_max = 40e6 * 1000 = 4e10 < 2^36, fits uint64_t.
+    // num_max: scaled_tone <= 4395<<7 = 562560; raw_num <= 2048*1048575 ~2.1e9
+    //   product ~1.2e15 < 2^50, fits uint64_t.
+    uint32_t delta_b;
+
+    uint64_t num = (uint64_t)scaled_tone * (uint64_t)_si_cache.raw_num;
+    uint64_t den = (uint64_t)_si_cache.full_den * 1000ULL; // [MODIFIED] was full_den alone — missing /1000 for mHz->Hz
+    delta_b = (uint32_t)((num + den / 2u) / den);
+
     uint32_t pll_b = _si_cache.pll_b_base + delta_b;
 
-    // Clamp to valid range [0, pll_c - 1]
     if (pll_b >= _si_cache.pll_c) {
         pll_b = _si_cache.pll_c - 1u;
     }
@@ -908,8 +919,8 @@ esp_err_t oscillator_set_freq_mhz(uint32_t base_hz, int32_t offset_millihz) {
         // For Si5351: update only the PLL numerator b for the new tone offset.
         // The base_hz parameter is not needed here because the band cache already
         // encodes the base frequency; only the offset changes between WSPR symbols.
-        uint32_t tone_mhz = (offset_millihz >= 0) ? (uint32_t)offset_millihz : 0u;
-        return si_apply_tone(tone_mhz);
+        uint32_t tone_millihz = (offset_millihz >= 0) ? (uint32_t)offset_millihz : 0u;
+        return si_apply_tone(tone_millihz);
     }
 
     if (_osc_type == OSC_AD9850) {
@@ -963,6 +974,8 @@ esp_err_t oscillator_enable(bool en) {
     if (_osc_type == OSC_SI5351) {
         // Register 3 (Output Enable Control): bit 0 = CLK0 disable (active-low logic).
         // 0xFE (1111 1110) enables CLK0; 0xFF disables all outputs.
+        // Track output state for si_cache_band PLL-reset muting.
+        _si_output_enabled = en;
         uint8_t val = en ? 0xFE : 0xFF;
         return si_write(3, val);
     }
@@ -971,7 +984,15 @@ esp_err_t oscillator_enable(bool en) {
             // Restore the last programmed frequency when coming out of power-down
             if (_ad_last_hz > 0u) {
                 uint32_t fw = ad9850_freq_word(_ad_last_hz);
-                fw += (_ad_last_frac * AD9850_FTW_FRAC_PER_MHZ_NUM) / AD9850_FTW_FRAC_PER_MHZ_DEN;
+                // [MODIFIED] Use the runtime-calibrated numerator instead of the
+                // compile-time AD9850_FTW_FRAC_PER_MHZ_NUM constant.
+                // When oscillator_set_cal() has adjusted _ad_ftw_int_per_hz_cal,
+                // the old constant produced the wrong mHz FTW increment, causing
+                // a systematic frequency error on re-enable proportional to
+                // (ppb_cal * _ad_last_frac). This matches oscillator_set_freq_mhz().
+                uint32_t ad_ftw_frac_num_en = _ad_ftw_int_per_hz_cal * AD9850_FTW_FRAC_DEN
+                                             + AD9850_FTW_FRAC_NUM; // [MODIFIED] was AD9850_FTW_FRAC_PER_MHZ_NUM
+                fw += (_ad_last_frac * ad_ftw_frac_num_en) / AD9850_FTW_FRAC_PER_MHZ_DEN;
                 ad9850_write_word(fw, 0x00u); // phase/control = 0: normal operation
             }
         } else {

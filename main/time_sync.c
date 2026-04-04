@@ -452,9 +452,15 @@ static bool gps_probe_detect(uint32_t timeout_ms) {
 
     ESP_LOGI(TAG, "GPS auto-detect: probing UART%d RX=%d for %u ms ...", CONFIG_GPS_UART_PORT, CONFIG_GPS_RX_GPIO, (unsigned)timeout_ms);
 
+    // [MODIFIED] Flush stale bytes ONCE before the loop, not on every iteration.
+    // Flushing inside the loop discards partial NMEA sentences accumulated in the
+    // previous 200 ms window: any sentence spanning two consecutive read windows
+    // was silently dropped, making GPS detection unreliable at 9600 baud where
+    // an 80-char sentence takes ~83 ms and can easily span two 200 ms windows.
+    uart_flush(GPS_UART_PORT_NUM);
+
     while (elapsed_ms < timeout_ms) {
-        // Flush any stale bytes at the very start
-        uart_flush(GPS_UART_PORT_NUM);
+        // [MODIFIED] uart_flush() removed from here - moved above the loop.
 
         int len = uart_read_bytes(GPS_UART_PORT_NUM, buf, sizeof(buf) - 1, pdMS_TO_TICKS(CHUNK_MS));
         elapsed_ms += CHUNK_MS;
@@ -624,16 +630,15 @@ bool time_sync_get(struct timeval *tv) {
 // Phase mapping:
 //   p == 0  : pre-arm second (:00) -- return 0
 //   p == 1  : TX start second (:01) -- return 0
-//   p == 2..4: just missed window -- return 0 (scheduler skips slot)
-//   p >= 5  : return seconds until next phase 1 (= 121 - p)
+//   p >= 2  : return seconds until next phase 1 (= 121 - p)
+// When p==2..4 the post-skip guard loop (main.c) checked secs_to_next_tx()>0 to exit;
 int32_t time_sync_secs_to_next_tx(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     uint32_t p = (uint32_t)(tv.tv_sec % 120u);
     if (p <= 1u)
         return 0;
-    if (p <= 4u)
-        return 0;
+
     return (int32_t)(121u - p);
 }
 

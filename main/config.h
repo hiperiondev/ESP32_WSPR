@@ -163,19 +163,19 @@ typedef enum {
  * the default @ref BAND_FILTER table.
  */
 typedef enum {
-    BAND_2200M = 0, /**< 2200 m MF band — dial frequency 137 600 Hz */
-    BAND_630M,      /**< 630 m LF band — dial frequency 475 700 Hz */
-    BAND_160M,      /**< 160 m HF band — dial frequency 1 838 100 Hz */
-    BAND_80M,       /**< 80 m HF band — dial frequency 3 570 100 Hz */
-    BAND_60M,       /**< 60 m HF band — dial frequency region-dependent (see @ref iaru_region_t) */
-    BAND_40M,       /**< 40 m HF band — dial frequency 7 040 100 Hz */
-    BAND_30M,       /**< 30 m HF band — dial frequency 10 140 200 Hz */
-    BAND_20M,       /**< 20 m HF band — dial frequency 14 097 100 Hz */
-    BAND_17M,       /**< 17 m HF band — dial frequency 18 106 100 Hz */
-    BAND_15M,       /**< 15 m HF band — dial frequency 21 096 100 Hz */
-    BAND_12M,       /**< 12 m HF band — dial frequency 24 926 100 Hz */
-    BAND_10M,       /**< 10 m HF band — dial frequency 28 126 100 Hz */
-    BAND_COUNT      /**< Sentinel — total number of bands; do not use as a band index */
+    BAND_2200M = 0, // 2200 m MF band -- RF center frequency 137 600 Hz (SSB dial 136 100 Hz)
+    BAND_630M,      // 630 m LF band  -- RF center frequency 475 700 Hz (SSB dial 474 200 Hz)
+    BAND_160M,      // 160 m HF band  -- RF center frequency 1 838 100 Hz (SSB dial 1 836 600 Hz)
+    BAND_80M,       // 80 m HF band   -- RF center frequency 3 570 100 Hz (SSB dial 3 568 600 Hz)
+    BAND_60M,       // 60 m HF band   -- RF center frequency region-dependent (see iaru_region_t)
+    BAND_40M,       // 40 m HF band   -- RF center frequency 7 040 100 Hz (SSB dial 7 038 600 Hz)
+    BAND_30M,       // 30 m HF band   -- RF center frequency 10 140 200 Hz (SSB dial 10 138 700 Hz)
+    BAND_20M,       // 20 m HF band   -- RF center frequency 14 097 100 Hz (SSB dial 14 095 600 Hz)
+    BAND_17M,       // 17 m HF band   -- RF center frequency 18 106 100 Hz (SSB dial 18 104 600 Hz)
+    BAND_15M,       // 15 m HF band   -- RF center frequency 21 096 100 Hz (SSB dial 21 094 600 Hz)
+    BAND_12M,       // 12 m HF band   -- RF center frequency 24 926 100 Hz (SSB dial 24 924 600 Hz)
+    BAND_10M,       // 10 m HF band   -- RF center frequency 28 126 100 Hz (SSB dial 28 124 600 Hz)
+    BAND_COUNT      // Sentinel -- total number of bands; do not use as a band index
 } wspr_band_t;
 
 static_assert(BAND_COUNT == 12, "BAND_COUNT changed; update all band tables");
@@ -192,8 +192,9 @@ static_assert(BAND_COUNT == 12, "BAND_COUNT changed; update all band tables");
  *  - Row 1 (Region 2): 5 346 500 Hz
  *  - Row 2 (Region 3): 5 367 000 Hz
  *
- * The oscillator is programmed to @c BAND_FREQ_HZ[region-1][band] + 1500 Hz
- * (the audio centre offset) at the start of each transmission window.
+ * BAND_FREQ_HZ already stores the RF center output frequency (= SSB dial + 1500 Hz).
+ * The oscillator is programmed directly to BAND_FREQ_HZ[region-1][band];
+ * no additional audio offset is added at runtime.
  *
  * Do not access this array directly; use @ref config_band_freq_hz() which
  * bounds-checks the region index and falls back to Region 1 on invalid input.

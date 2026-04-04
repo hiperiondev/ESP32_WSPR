@@ -225,6 +225,7 @@ static void wspr_transmit(void) {
     if (g_pre_armed) {
         base_hz = g_pre_arm_base_hz;
     } else {
+        // BAND_FREQ_HZ already contains the RF center frequency (SSB dial + 1500 Hz); no additional offset
         base_hz = config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx);
         oscillator_set_freq(base_hz);
         gpio_filter_select(BAND_FILTER[g_band_idx]);
@@ -233,20 +234,61 @@ static void wspr_transmit(void) {
 
     g_pre_armed = false;
 
+    // apply symbol 0 tone BEFORE enabling RF output so the oscillator
+    // is at the correct frequency the instant it is keyed.
+    // round tone offset with +128 before divide (Bug #3).
+    int32_t tone0_millihz = (int32_t)((symbols[0] * 375000UL + 128UL) / 256UL);
+    oscillator_set_freq_mhz(base_hz, tone0_millihz);
+
     oscillator_tx_begin();
     oscillator_enable(true);
     g_tx_active = true;
     uint32_t tx_start_us = timer_us32();
 
-    ESP_LOGI(TAG, "TX start: band=%s freq=%lu+1500 Hz type=%d parity=%d pre_armed=%d stack HWM=%u bytes", BAND_NAME[g_band_idx],
-             (unsigned long)config_band_freq_hz((iaru_region_t)snap_region, (wspr_band_t)g_band_idx), (int)msg_type, (int)snap_parity,
-             (int)(g_pre_arm_base_hz != 0), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    // ── TX timing diagnostic ──
+    {
+        struct timeval tv_tx;
+        gettimeofday(&tv_tx, NULL);
+        struct tm tm_tx;
+        gmtime_r(&tv_tx.tv_sec, &tm_tx);
+        uint32_t tx_sec = (uint32_t)(tv_tx.tv_sec % 120u); // phase within 2-min cycle
+        uint32_t tx_usec = (uint32_t)tv_tx.tv_usec;
+
+        // Classify alignment quality for easy log grepping
+        const char *align_verdict;
+        if (tx_sec == 1u && tx_usec < 50000u)
+            align_verdict = "OK";
+        else if (tx_sec == 1u && tx_usec < 200000u)
+            align_verdict = "LATE_USEC";
+        else if (tx_sec == 0u)
+            align_verdict = "EARLY";
+        else if (tx_sec >= 2u && tx_sec <= 4u)
+            align_verdict = "VERY_LATE";
+        else
+            align_verdict = "BAD_PHASE";
+
+        ESP_LOGI(TAG,
+                 "TX start: %02d:%02d:%02d.%06lu UTC  "
+                 "phase=%lu s  usec=%lu  verdict=%s  "
+                 "band=%s  freq=%lu Hz  type=%d  parity=%d  "
+                 "pre_armed=%d  stack_HWM=%u B",
+                 tm_tx.tm_hour, tm_tx.tm_min, tm_tx.tm_sec, (unsigned long)tv_tx.tv_usec, (unsigned long)tx_sec, (unsigned long)tx_usec, align_verdict,
+                 BAND_NAME[g_band_idx], (unsigned long)base_hz, (int)msg_type, (int)snap_parity, (int)(g_pre_arm_base_hz != 0),
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
+        if (tx_sec != 1u) {
+            ESP_LOGW(TAG,
+                     "TX TIMING WARNING: symbol 0 started at phase=%lu s (expected 1). "
+                     "Check NTP/GPS sync and fine-alignment loop.",
+                     (unsigned long)tx_sec);
+        }
+    }
+    // ── fin diagnostico ──
 
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
         g_symbol_idx = i;
 
         // check tone_active on every symbol (was every 10 = ~6.8 s gap).
-        // One cfg_mutex lock per symbol (every ~683 ms) is negligible overhead.
         {
             web_server_cfg_lock();
             bool tone_abort = g_cfg.tone_active;
@@ -261,8 +303,12 @@ static void wspr_transmit(void) {
         esp_task_wdt_reset();
 #endif
 
-        int32_t tone_offset_millihz = (int32_t)(((uint32_t)symbols[i] * WSPR_TONE_NUM + (WSPR_TONE_DEN / 2UL)) / WSPR_TONE_DEN);
-        oscillator_set_freq_mhz(base_hz, tone_offset_millihz);
+        // skip redundant set_freq_mhz for i==0.
+        // round tone offset: (sym*375000 + 128) / 256.
+        if (i > 0) {
+            int32_t tone_offset_millihz = (int32_t)((symbols[i] * 375000UL + 128UL) / 256UL);
+            oscillator_set_freq_mhz(base_hz, tone_offset_millihz);
+        }
 
         uint32_t target_x3 = (uint32_t)(i + 1) * WSPR_PERIOD_3X_US;
         for (;;) {
@@ -339,7 +385,8 @@ static void status_task(void *arg) {
         web_server_cfg_unlock();
 
         if (g_band_idx >= 0) {
-            uint32_t freq_hz = config_band_freq_hz((iaru_region_t)region_snap, (wspr_band_t)g_band_idx) + 1500u;
+            // BAND_FREQ_HZ already stores the RF center frequency (SSB dial + 1500 Hz); no additional offset needed
+            uint32_t freq_hz = config_band_freq_hz((iaru_region_t)region_snap, (wspr_band_t)g_band_idx);
             uint32_t mhz_int = freq_hz / 1000000u;
             uint32_t khz_frac = (freq_hz % 1000000u) / 100u;
             snprintf(freq_str, sizeof(freq_str), "%u.%04u MHz", (unsigned)mhz_int, (unsigned)khz_frac);
@@ -371,7 +418,6 @@ static void scheduler_task(void *arg) {
     select_next_band(false, true);
 
     // The last frequency hop wall-clock second.
-    // Allows hop_interval_sec to be any value >= 120, not only multiples of 120.
     uint32_t s_last_hop_time_sec = 0;
     bool s_hop_anchored = false;
     bool s_duty_primed = false;
@@ -380,14 +426,12 @@ static void scheduler_task(void *arg) {
     uint8_t s_prev_duty = 0u;
 
     bool time_synced_logged = false;
-    //  Tone test mode: tracks oscillator state across loop iterations
+    // Tone test mode: tracks oscillator state across loop iterations
     bool s_tone_was_active = false;
     uint32_t s_tone_last_hz = 0u;
 
     while (1) {
         // Tone test mode: takes priority over all WSPR scheduling.
-        // When active the scheduler outputs a CW carrier at the requested frequency
-        // and bypasses time-sync gating, duty-cycle, band-hopping, and TX.
         {
             web_server_cfg_lock();
             bool tone_snap = g_cfg.tone_active;
@@ -395,18 +439,14 @@ static void scheduler_task(void *arg) {
             web_server_cfg_unlock();
             if (tone_snap) {
                 uint32_t tone_hz = (uint32_t)(tone_freq_snap * 1000.0f);
-                // Also reprogram when oscillator cache was invalidated by
-                // oscillator_set_cal() while the tone was already running.
-                // Without this check, saving a new xtal_cal_ppb via the web UI while
-                // tone is active causes oscillator_set_cal() to clear _si_cache.valid
-                // and reset _si_last_set_hz to 0, but the tone loop never calls
-                // oscillator_set_freq() again because s_tone_was_active is true and
-                // tone_hz == s_tone_last_hz, so the calibration has no effect on the
-                // running tone output. Detected via oscillator_cache_valid() which
-                // returns false whenever the Si5351 band cache has been invalidated.
                 bool _cache_invalid = s_tone_was_active && !oscillator_cache_valid();
                 if (!s_tone_was_active || tone_hz != s_tone_last_hz || _cache_invalid) {
-                    // First entry into tone mode, frequency changed, or cal updated: reprogram
+                    // Disable output before reprogramming to avoid spurious
+                    // tone during Si5351 PLL reset transient.
+                    if (s_tone_was_active) {
+                        oscillator_enable(false);
+                        g_tx_active = false;
+                    }
                     s_tone_last_hz = tone_hz;
                     uint8_t tone_filter = freq_to_filter(tone_hz);
                     gpio_filter_select(tone_filter);
@@ -425,9 +465,6 @@ static void scheduler_task(void *arg) {
                         ESP_LOGI(TAG, "Tone cal update applied: %.3f kHz reprogrammed with new calibration", (double)tone_freq_snap);
                     }
                 }
-                // reset the task watchdog every tone-loop iteration.
-                // vTaskDelay yields to the OS but does NOT count as a WDT reset
-                // for wspr_sched; without this the WDT fires after ~5 s of tone mode.
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                 esp_task_wdt_reset();
 #endif
@@ -497,10 +534,8 @@ static void scheduler_task(void *arg) {
             }
 
             // Hop timer: compare elapsed seconds against hop_interval_sec.
-            // Bands advance every hop_interval_sec wall-clock seconds.
             bool do_hop;
             if (!s_hop_anchored) {
-                // First slot after time sync: anchor the hop timer without advancing.
                 do_hop = false;
                 s_last_hop_time_sec = now;
                 s_hop_anchored = true;
@@ -512,7 +547,6 @@ static void scheduler_task(void *arg) {
                 select_next_band(do_hop, need_rebuild || g_band_idx < 0);
                 if (do_hop)
                     s_last_hop_time_sec = now;
-                // If a stale pre-arm exists for a different frequency, cancel it.
                 if (g_pre_armed) {
                     web_server_cfg_lock();
                     uint8_t new_region = g_cfg.iaru_region;
@@ -554,23 +588,12 @@ static void scheduler_task(void *arg) {
                 g_pre_armed = false;
                 g_pre_arm_base_hz = 0;
 
-                // Accumulate credit for missed windows (accum capped at 200)
-                s_duty_accum += (uint16_t)duty;
                 if (s_duty_accum > 200u)
                     s_duty_accum = 200u;
-                // Undo the addition we already did for this slot above so we do not
-                // double-count: the add above was for "would TX", but we skipped it.
-                // Net effect: duty is added once (credit toward next slot).
-                // The value added above before the do_tx check already advanced the
-                // accumulator by duty; undo the 100-subtraction was not done because
-                // do_tx was false, so the accumulator correctly advanced by duty already.
-                // No extra action needed here except the cap.
 
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                 esp_task_wdt_reset();
 #endif
-                // sleep in 100 ms chunks checking tone_active so tone
-                // test can start within ~100 ms instead of waiting up to 12 s.
                 {
                     uint32_t duty_guard_ms = 2000u;
                     while (duty_guard_ms > 0u) {
@@ -620,8 +643,6 @@ static void scheduler_task(void *arg) {
                 esp_task_wdt_reset();
 #endif
                 sleep_ms -= chunk;
-                // check tone_active in the coarse sleep so tone test
-                // starts within ~200 ms even when the next TX is minutes away.
                 web_server_cfg_lock();
                 bool tone_coarse = g_cfg.tone_active;
                 web_server_cfg_unlock();
@@ -653,11 +674,6 @@ static void scheduler_task(void *arg) {
                         ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
                     }
                 } else if (phase == 1u) {
-                    // Late pre-arm fallback — if we somehow arrived at phase 1
-                    // without going through phase 0 (e.g. coarse sleep overshot),
-                    // set up the oscillator and filter now. LPF settle time
-                    // (CONFIG_WSPR_LPF_SETTLE_MS, default 10 ms) is well within
-                    // the first WSPR symbol period (682 ms).
                     if (!pre_armed_local) {
                         g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx);
                         oscillator_set_freq(g_pre_arm_base_hz);
@@ -667,23 +683,86 @@ static void scheduler_task(void *arg) {
                         pre_armed_local = true;
                         ESP_LOGW(TAG, "Late pre-arm at phase=1: band=%s base_hz=%lu", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
                     }
-                    break;
+
+                    // [MODIFIED] Sub-second spin to align TX start to within
+                    // 50ms of the :01 second boundary.
+                    // WSPR decoders accept at most +-1s DT; starting at :01.000-:01.050
+                    // gives DT=0 which is ideal. Starting at :01.050-:01.999 still
+                    // gives DT<1 and is decodable but with reduced margin.
+                    // Previous bug: if the spin exhausted its 950-iteration safety limit
+                    // at a point where the second had already rolled to :02, the outer
+                    // loop would call wspr_transmit() at phase 2 without setting
+                    // do_skip=true, causing a consistently-undecodable late TX.
+                    // Fix: after the spin exits, re-check the phase; if we have drifted
+                    // past :01, set do_skip=true so this slot is abandoned and the
+                    // scheduler waits for the next even-minute window.
+                    {
+                        // [MODIFIED] Increased spin limit from 950 to 1500 to cover the
+                        // worst-case entry at usec=50001 ms which needs up to 950 ms of
+                        // spinning. The old limit of 950 was correct in theory (950ms)
+                        // but any OS jitter consuming >1ms per vTaskDelay(1) tick could
+                        // exhaust the limit early, causing premature exit while still in
+                        // phase 1. 1500ms provides comfortable margin even with 2ms ticks.
+                        uint32_t spins = 0;
+                        for (;;) {
+                            struct timeval tv_sub;
+                            gettimeofday(&tv_sub, NULL);
+                            uint32_t cur_phase = (uint32_t)(tv_sub.tv_sec % 120u);
+                            // Exit immediately if phase has changed (rolled past :01)
+                            if (cur_phase != 1u)
+                                break;
+                            // Exit when usec is within the 50ms alignment window
+                            if ((uint32_t)tv_sub.tv_usec < 50000u)
+                                break;
+                            // Safety exit: should not be reached under normal conditions
+                            if (++spins > 1500u)
+                                break;
+                            vTaskDelay(pdMS_TO_TICKS(1));
+                        }
+
+                        // [MODIFIED] Re-verify phase after the spin loop exits.
+                        // If the second rolled past :01 (phase != 1 or usec >= 50000
+                        // at entry-to-next-second), the slot is undecodable.
+                        // Set do_skip=true so wspr_transmit() is NOT called.
+                        {
+                            struct timeval tv_verify;
+                            gettimeofday(&tv_verify, NULL);
+                            uint32_t verify_phase = (uint32_t)(tv_verify.tv_sec % 120u);
+                            if (verify_phase != 1u) {
+                                // Phase has rolled past :01 — TX would be too late
+                                ESP_LOGW(TAG,
+                                         "Sub-second spin exited at phase=%lu (expected 1): "
+                                         "slot skipped to protect decode quality",
+                                         (unsigned long)verify_phase);
+                                g_pre_armed = false;
+                                g_pre_arm_base_hz = 0;
+                                do_skip = true;
+                            }
+                            // phase==1 and usec<50000: alignment is good, proceed with TX
+                        }
+                    }
+                    break; // exit the outer fine-alignment for(;;) loop
                 } else if (phase >= 2u && phase <= 4u) {
                     ESP_LOGW(TAG, "Missed TX window (phase=%lu), skipping slot", (unsigned long)phase);
                     g_pre_armed = false;
                     g_pre_arm_base_hz = 0;
                     do_skip = true;
                     break;
+                } else {
+                    // phase >= 5 -- sleep proportionally to distance from :00
+                    uint32_t dist = (phase < 120u) ? (120u - phase) : 1u;
+                    uint32_t chunk_ms = (dist > 1u) ? ((dist - 1u) * 1000u) : 1u;
+                    if (chunk_ms > 200u)
+                        chunk_ms = 200u;
+                    vTaskDelay(pdMS_TO_TICKS(chunk_ms));
                 }
-
-                vTaskDelay(pdMS_TO_TICKS(1));
 
 #if CONFIG_WSPR_TASK_WDT_ENABLE
                 esp_task_wdt_reset();
 #endif
                 web_server_cfg_lock();
                 bool still_en = g_cfg.tx_enabled;
-                bool tone_req = g_cfg.tone_active; // abort alignment if tone activated
+                bool tone_req = g_cfg.tone_active;
                 web_server_cfg_unlock();
 
                 if (!still_en || tone_req) {
@@ -693,44 +772,12 @@ static void scheduler_task(void *arg) {
                     break;
                 }
             }
-
-            if (!do_skip) {
-                struct timeval tv_align;
-                gettimeofday(&tv_align, NULL);
-                uint32_t usec_now = (uint32_t)tv_align.tv_usec;
-
-                if (usec_now >= 5000u && usec_now < 900000u) {
-                    uint32_t coarse_us = 1000000u - usec_now;
-                    if (coarse_us > 3000u) {
-                        uint32_t sleep_ms = (coarse_us - 3000u) / 1000u;
-                        if (sleep_ms > 0u)
-                            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
-                    }
-
-                    do {
-                        gettimeofday(&tv_align, NULL);
-                        usec_now = (uint32_t)tv_align.tv_usec;
-                        taskYIELD();
-#if CONFIG_WSPR_TASK_WDT_ENABLE
-                        esp_task_wdt_reset();
-#endif
-                    } while (usec_now >= 5000u && usec_now < 950000u);
-                }
-            }
         }
 
         if (do_skip) {
 #if CONFIG_WSPR_TASK_WDT_ENABLE
             esp_task_wdt_reset();
 #endif
-            // Post-skip guard: always sleep at least 2 seconds.
-            // Ensures phase counter has advanced past the ambiguous boundary
-            // region before we re-evaluate.
-            // each 100 ms chunk checks tone_active so tone test
-            // starts within ~100 ms instead of waiting up to 12 s for the
-            // full guard to expire. Without this, activating tone while the
-            // scheduler was in the post-skip delay caused intermittent
-            // "tone button active but no output" behaviour.
             {
                 uint32_t guard_ms = 2000u;
                 while (guard_ms > 0u) {
@@ -747,7 +794,6 @@ static void scheduler_task(void *arg) {
                         goto skip_post_guard;
                 }
             }
-            // Wait until the TX window closes (secs_to_next_tx > 0) before looping.
             for (int _guard = 0; _guard < 10; _guard++) {
                 vTaskDelay(pdMS_TO_TICKS(100));
 #if CONFIG_WSPR_TASK_WDT_ENABLE
@@ -758,7 +804,6 @@ static void scheduler_task(void *arg) {
                 web_server_cfg_unlock();
                 if (tone_guard_check)
                     goto skip_post_guard;
-                // break once we are past the current TX window
                 if (time_sync_secs_to_next_tx() > 0)
                     break;
             }
