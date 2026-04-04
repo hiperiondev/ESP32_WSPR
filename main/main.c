@@ -234,13 +234,23 @@ static void wspr_transmit(void) {
 
     g_pre_armed = false;
 
+    // oscillator_tx_begin() sets _osc_tx_active=true which defers any
+    // calibration change inside oscillator_set_cal(). If a web-UI calibration
+    // update arrives between si_apply_tone() (inside set_freq_mhz) and the
+    // previous oscillator_tx_begin() call, oscillator_set_cal() would invalidate
+    // the Si5351 band cache (_si_cache.valid=false) BEFORE the TX window is
+    // protected. The next si_apply_tone() call in the symbol loop would then
+    // return ESP_ERR_INVALID_STATE (return value ignored by the loop), causing
+    // the Si5351 to hold the last written PLL value for the remainder of the
+    // WSPR frame -- all remaining symbols wrong frequency, frame undecodable.
+    oscillator_tx_begin(); // protect cache from cal races BEFORE first si_apply_tone
+
     // apply symbol 0 tone BEFORE enabling RF output so the oscillator
     // is at the correct frequency the instant it is keyed.
     // round tone offset with +128 before divide (Bug #3).
     int32_t tone0_millihz = (int32_t)((symbols[0] * 375000UL + 128UL) / 256UL);
     oscillator_set_freq_mhz(base_hz, tone0_millihz);
 
-    oscillator_tx_begin();
     oscillator_enable(true);
     g_tx_active = true;
     uint32_t tx_start_us = timer_us32();
@@ -673,6 +683,13 @@ static void scheduler_task(void *arg) {
                         pre_armed_local = true;
                         ESP_LOGD(TAG, "Pre-armed: band=%s base_hz=%lu (phase=0)", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
                     }
+                    // Prevent 100% CPU spin during the ~1-second window
+                    // between phase==0 (pre-arm) and phase==1 (TX start).
+                    // Without this delay the loop iterates at maximum speed after
+                    // pre_armed_local becomes true, starving other tasks of CPU time
+                    // and increasing the risk of OS jitter when the critical phase==1
+                    // sub-second spin begins.
+                    vTaskDelay(pdMS_TO_TICKS(1)); // 1ms sleep prevents CPU starvation
                 } else if (phase == 1u) {
                     if (!pre_armed_local) {
                         g_pre_arm_base_hz = config_band_freq_hz((iaru_region_t)pre_snap_region, (wspr_band_t)g_band_idx);
@@ -684,7 +701,7 @@ static void scheduler_task(void *arg) {
                         ESP_LOGW(TAG, "Late pre-arm at phase=1: band=%s base_hz=%lu", BAND_NAME[(int)g_band_idx], (unsigned long)g_pre_arm_base_hz);
                     }
 
-                    // [MODIFIED] Sub-second spin to align TX start to within
+                    // Sub-second spin to align TX start to within
                     // 50ms of the :01 second boundary.
                     // WSPR decoders accept at most +-1s DT; starting at :01.000-:01.050
                     // gives DT=0 which is ideal. Starting at :01.050-:01.999 still
@@ -693,54 +710,47 @@ static void scheduler_task(void *arg) {
                     // at a point where the second had already rolled to :02, the outer
                     // loop would call wspr_transmit() at phase 2 without setting
                     // do_skip=true, causing a consistently-undecodable late TX.
-                    // Fix: after the spin exits, re-check the phase; if we have drifted
+                    // after the spin exits, re-check the phase; if we have drifted
                     // past :01, set do_skip=true so this slot is abandoned and the
                     // scheduler waits for the next even-minute window.
-                    {
-                        // [MODIFIED] Increased spin limit from 950 to 1500 to cover the
-                        // worst-case entry at usec=50001 ms which needs up to 950 ms of
-                        // spinning. The old limit of 950 was correct in theory (950ms)
-                        // but any OS jitter consuming >1ms per vTaskDelay(1) tick could
-                        // exhaust the limit early, causing premature exit while still in
-                        // phase 1. 1500ms provides comfortable margin even with 2ms ticks.
-                        uint32_t spins = 0;
-                        for (;;) {
-                            struct timeval tv_sub;
-                            gettimeofday(&tv_sub, NULL);
-                            uint32_t cur_phase = (uint32_t)(tv_sub.tv_sec % 120u);
-                            // Exit immediately if phase has changed (rolled past :01)
-                            if (cur_phase != 1u)
-                                break;
-                            // Exit when usec is within the 50ms alignment window
-                            if ((uint32_t)tv_sub.tv_usec < 50000u)
-                                break;
-                            // Safety exit: should not be reached under normal conditions
-                            if (++spins > 1500u)
-                                break;
-                            vTaskDelay(pdMS_TO_TICKS(1));
-                        }
 
-                        // [MODIFIED] Re-verify phase after the spin loop exits.
-                        // If the second rolled past :01 (phase != 1 or usec >= 50000
-                        // at entry-to-next-second), the slot is undecodable.
-                        // Set do_skip=true so wspr_transmit() is NOT called.
-                        {
-                            struct timeval tv_verify;
-                            gettimeofday(&tv_verify, NULL);
-                            uint32_t verify_phase = (uint32_t)(tv_verify.tv_sec % 120u);
-                            if (verify_phase != 1u) {
-                                // Phase has rolled past :01 — TX would be too late
-                                ESP_LOGW(TAG,
-                                         "Sub-second spin exited at phase=%lu (expected 1): "
-                                         "slot skipped to protect decode quality",
-                                         (unsigned long)verify_phase);
-                                g_pre_armed = false;
-                                g_pre_arm_base_hz = 0;
-                                do_skip = true;
-                            }
-                            // phase==1 and usec<50000: alignment is good, proceed with TX
-                        }
+                    uint32_t spins = 0;
+                    for (;;) {
+                        struct timeval tv_sub;
+                        gettimeofday(&tv_sub, NULL);
+                        uint32_t cur_phase = (uint32_t)(tv_sub.tv_sec % 120u);
+                        // Exit immediately if phase has changed (rolled past :01)
+                        if (cur_phase != 1u)
+                            break;
+                        // Exit when usec is within the 50ms alignment window
+                        if ((uint32_t)tv_sub.tv_usec < 50000u)
+                            break;
+                        // Safety exit: should not be reached under normal conditions
+                        if (++spins > 1500u)
+                            break;
+                        vTaskDelay(pdMS_TO_TICKS(1));
                     }
+
+                    // Re-verify phase after the spin loop exits.
+                    // If the second rolled past :01 (phase != 1 or usec >= 50000
+                    // at entry-to-next-second), the slot is undecodable.
+                    // Set do_skip=true so wspr_transmit() is NOT called.
+
+                    struct timeval tv_verify;
+                    gettimeofday(&tv_verify, NULL);
+                    uint32_t verify_phase = (uint32_t)(tv_verify.tv_sec % 120u);
+                    if (verify_phase != 1u) {
+                        // Phase has rolled past :01 — TX would be too late
+                        ESP_LOGW(TAG,
+                                 "Sub-second spin exited at phase=%lu (expected 1): "
+                                 "slot skipped to protect decode quality",
+                                 (unsigned long)verify_phase);
+                        g_pre_armed = false;
+                        g_pre_arm_base_hz = 0;
+                        do_skip = true;
+                    }
+                    // phase==1 and usec<50000: alignment is good, proceed with TX
+
                     break; // exit the outer fine-alignment for(;;) loop
                 } else if (phase >= 2u && phase <= 4u) {
                     ESP_LOGW(TAG, "Missed TX window (phase=%lu), skipping slot", (unsigned long)phase);

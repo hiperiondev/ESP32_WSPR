@@ -496,7 +496,7 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     uint32_t xtal_kHz = _si_xtal / 1000UL;
     uint32_t full_den = xtal_kHz * 1000UL; // = xtal_Hz
     uint32_t raw_num = d_int * pll_c;
-    // FIXED: store raw_num in cache for use by si_apply_tone
+    // store raw_num in cache for use by si_apply_tone
     _si_cache.raw_num = raw_num;
     uint32_t b_step_int = raw_num / full_den;
     uint32_t b_step_rem1 = raw_num % full_den;
@@ -593,7 +593,7 @@ static esp_err_t si_apply_tone(uint32_t tone_millihz) {
     // Scale the milli-Hz offset to account for the R-divider
     uint32_t scaled_tone = tone_millihz << _si_cache.r_div_reg;
 
-    // [MODIFIED] Compute delta_b with the correct mHz-to-Hz conversion.
+    // Compute delta_b with the correct mHz-to-Hz conversion.
     // Derivation: delta_b = tone_Hz * d_int * pll_c * 2^r / xtal_Hz
     //                     = (tone_mHz / 1000) * raw_num / full_den
     // Implemented by multiplying the denominator by 1000 to avoid losing
@@ -606,7 +606,7 @@ static esp_err_t si_apply_tone(uint32_t tone_millihz) {
     uint32_t delta_b;
 
     uint64_t num = (uint64_t)scaled_tone * (uint64_t)_si_cache.raw_num;
-    uint64_t den = (uint64_t)_si_cache.full_den * 1000ULL; // [MODIFIED] was full_den alone — missing /1000 for mHz->Hz
+    uint64_t den = (uint64_t)_si_cache.full_den * 1000ULL;
     delta_b = (uint32_t)((num + den / 2u) / den);
 
     uint32_t pll_b = _si_cache.pll_b_base + delta_b;
@@ -984,14 +984,9 @@ esp_err_t oscillator_enable(bool en) {
             // Restore the last programmed frequency when coming out of power-down
             if (_ad_last_hz > 0u) {
                 uint32_t fw = ad9850_freq_word(_ad_last_hz);
-                // [MODIFIED] Use the runtime-calibrated numerator instead of the
+                // Use the runtime-calibrated numerator instead of the
                 // compile-time AD9850_FTW_FRAC_PER_MHZ_NUM constant.
-                // When oscillator_set_cal() has adjusted _ad_ftw_int_per_hz_cal,
-                // the old constant produced the wrong mHz FTW increment, causing
-                // a systematic frequency error on re-enable proportional to
-                // (ppb_cal * _ad_last_frac). This matches oscillator_set_freq_mhz().
-                uint32_t ad_ftw_frac_num_en = _ad_ftw_int_per_hz_cal * AD9850_FTW_FRAC_DEN
-                                             + AD9850_FTW_FRAC_NUM; // [MODIFIED] was AD9850_FTW_FRAC_PER_MHZ_NUM
+                uint32_t ad_ftw_frac_num_en = _ad_ftw_int_per_hz_cal * AD9850_FTW_FRAC_DEN + AD9850_FTW_FRAC_NUM;
                 fw += (_ad_last_frac * ad_ftw_frac_num_en) / AD9850_FTW_FRAC_PER_MHZ_DEN;
                 ad9850_write_word(fw, 0x00u); // phase/control = 0: normal operation
             }

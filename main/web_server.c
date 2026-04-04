@@ -224,7 +224,6 @@ static const char INDEX_HTML[] =
     "<input id='power' type='number' min='0' max='60' step='3'>"
     "<label>" WEBUI_LABEL_XTAL_CAL "</label>"
     // xtal-cal-row — ppb input (narrow) + measured kHz input + Auto button
-    // [MODIFIED] Corrected comment: * 1e9 (ppb = parts per BILLION, not ppm).
     // Auto button computes ppb = (measured_khz - nominal_khz)/nominal_khz*1e9
     // positive ppb = crystal fast (output too high) -> firmware lowers VCO to compensate
     "<div class='xtal-cal-row'>"
@@ -502,7 +501,6 @@ static const char INDEX_HTML[] =
     //   Restarting the tone calls oscillator_set_freq() with the corrected VCO/FTW.
     //   Result: corrected frequency is heard without any manual action by the user.
     //
-    // [MODIFIED] Corrected comment: * 1e9 (ppb = parts per BILLION, not ppm).
     // Formula: ppb = round((measured_khz - nominal_khz) / nominal_khz * 1e9)
     // positive ppb -> crystal fast (output too high) -> firmware lowers VCO/FTW
     "async function autoCalibrate(){"
@@ -516,7 +514,6 @@ static const char INDEX_HTML[] =
     // require tone test to be running so nominal frequency is known
     "if(nom<=0){"
     "toast('\\u274c Start Tone Test first so the nominal frequency is known','warn');return;}"
-    // [MODIFIED] Corrected comment: * 1e9, not * 1e6. ppb = parts per BILLION.
     // ppb = (measured - nominal) / nominal * 1e9  (kHz units cancel)
     // positive ppb = crystal fast (output above nominal) -> firmware lowers VCO
     // negative ppb = crystal slow (output below nominal) -> firmware raises VCO
@@ -1073,11 +1070,6 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
     if (!check_auth(req))
         return send_auth_challenge(req);
 #endif
-    // [MODIFIED] Removed wspr_config_t cfg_snap and config_save() call.
-    // config.h contract: "The flag is not saved to NVS by the toggle endpoint,
-    // so it resets to false on every cold boot." Saving here violated that:
-    // after a reboot the transmitter would start transmitting immediately without
-    // any user action, which is unsafe and against the explicit design intent.
     web_server_cfg_lock();
     _cfg->tx_enabled = !_cfg->tx_enabled;
     bool enabled = _cfg->tx_enabled;

@@ -452,7 +452,7 @@ static bool gps_probe_detect(uint32_t timeout_ms) {
 
     ESP_LOGI(TAG, "GPS auto-detect: probing UART%d RX=%d for %u ms ...", CONFIG_GPS_UART_PORT, CONFIG_GPS_RX_GPIO, (unsigned)timeout_ms);
 
-    // [MODIFIED] Flush stale bytes ONCE before the loop, not on every iteration.
+    // Flush stale bytes ONCE before the loop, not on every iteration.
     // Flushing inside the loop discards partial NMEA sentences accumulated in the
     // previous 200 ms window: any sentence spanning two consecutive read windows
     // was silently dropped, making GPS detection unreliable at 9600 baud where
@@ -460,8 +460,6 @@ static bool gps_probe_detect(uint32_t timeout_ms) {
     uart_flush(GPS_UART_PORT_NUM);
 
     while (elapsed_ms < timeout_ms) {
-        // [MODIFIED] uart_flush() removed from here - moved above the loop.
-
         int len = uart_read_bytes(GPS_UART_PORT_NUM, buf, sizeof(buf) - 1, pdMS_TO_TICKS(CHUNK_MS));
         elapsed_ms += CHUNK_MS;
 
