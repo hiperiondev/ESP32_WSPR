@@ -102,8 +102,12 @@
 
 // JS toast message when GPS locator fetch fails (Spanish)
 #define WEBUI_JS_GPS_LOC_ERR "Posici\\u00f3n GPS no disponible a\\u00fan"
+
 // Etiquetas del bot&#243;n de tono de prueba
 #define WEBUI_JS_BTN_TONE_START "Tono de prueba"
 #define WEBUI_JS_BTN_TONE_STOP  "Detener tono"
 #define WEBUI_JS_TONE_FREQ_HINT "kHz"
 #define WEBUI_JS_TONE_FREQ_ERR  "Frecuencia inv\u00e1lida (0.1 a 30000 kHz)"
+
+// etiqueta sobre el campo de frecuencia medida en la tarjeta Estaci&#243;n
+#define WEBUI_LABEL_TONE_RECV "Tono de prueba recibido"
