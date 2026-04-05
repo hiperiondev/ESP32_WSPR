@@ -104,7 +104,7 @@
 #define WEBUI_JS_BTN_TONE_START "Test Tone"
 #define WEBUI_JS_BTN_TONE_STOP  "Stop Tone"
 #define WEBUI_JS_TONE_FREQ_HINT "kHz"
-#define WEBUI_JS_TONE_FREQ_ERR  "Invalid frequency (0.1 to 30000 kHz)"
+#define WEBUI_JS_TONE_FREQ_ERR  "Invalid frequency (0.1 to "
 
 // label shown above the measured-frequency input in the Station card
 #define WEBUI_LABEL_TONE_RECV "Test tone received"

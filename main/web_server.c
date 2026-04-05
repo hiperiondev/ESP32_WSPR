@@ -229,13 +229,13 @@ static const char INDEX_HTML[] =
     "</div>"
     "<div class='tone-ctrl-row'>"
     "<button class='btn-tone off' id='tone_btn' onclick='toggleTone()'>" WEBUI_JS_BTN_TONE_START "</button>"
-    "<input id='tone_freq' type='number' min='0.1' max='30000' step='0.1' "
+    "<input id='tone_freq' type='number' min='0.1' max='145000' step='0.1' "
     "placeholder='kHz' value='7040.1' style='flex:1;min-width:0'>"
     "<span style='color:var(--sub);font-size:.82em;white-space:nowrap'>" WEBUI_JS_TONE_FREQ_HINT "</span>"
     "</div>"
     "<label style='margin-top:8px'>" WEBUI_LABEL_TONE_RECV "</label>"
     "<div class='meas-freq-row'>"
-    "<input id='meas_freq' type='number' min='0.001' max='30000' step='0.001' "
+    "<input id='meas_freq' type='number' min='0.001' max='145000' step='0.001' "
     "placeholder='kHz' title='Measured tone frequency in kHz'>"
     "<span style='color:var(--sub);font-size:.82em;white-space:nowrap'>" WEBUI_JS_TONE_FREQ_HINT "</span>"
     "</div>"
@@ -347,6 +347,11 @@ static const char INDEX_HTML[] =
     // Updated on every status poll from s.tone_freq_khz.
     // Used by autoCalibrate() as the nominal reference frequency.
     "let _toneFreqKhz=0;"
+    // runtime tone frequency ceiling in kHz.
+    // 30000 for AD9850/DUMMY (30 MHz hardware limit).
+    // 145000 for Si5351A (PLL architecture supports up to ~145 MHz).
+    // Updated on every status poll from s.si5351_active.
+    "let _toneMaxKhz=30000;"
 
     // convert a 4- or 6-character Maidenhead locator to the approximate
     // center lat/lon (decimal degrees) used to set the PSKReporter map center.
@@ -558,8 +563,9 @@ static const char INDEX_HTML[] =
     "const btn=document.getElementById('tone_btn');"
     "const freqInput=document.getElementById('tone_freq');"
     "const freqVal=parseFloat(freqInput.value);"
-    "if(isNaN(freqVal)||freqVal<0.1||freqVal>30000){"
-    "toast('\\u274c " WEBUI_JS_TONE_FREQ_ERR "','err');return;}"
+    // validate against hw-specific limit; error message shows actual max
+    "if(isNaN(freqVal)||freqVal<0.1||freqVal>_toneMaxKhz){"
+    "toast('\u274c " WEBUI_JS_TONE_FREQ_ERR "'+_toneMaxKhz+' kHz)','err');return;}"
     // currently active means button has class 'on' -> clicking will stop tone
     "const currentlyActive=btn.classList.contains('on');"
     "const newActive=!currentlyActive;"
@@ -641,6 +647,11 @@ static const char INDEX_HTML[] =
     // also store the nominal tone frequency for autoCalibrate()
     "updateToneBtn(!!s.tone_active,s.tone_freq_khz);"
     "if(s.tone_freq_khz&&s.tone_freq_khz>0)_toneFreqKhz=s.tone_freq_khz;"
+    // update tone frequency ceiling based on active oscillator type.
+    // Si5351A supports up to ~145 MHz; AD9850/DUMMY are limited to 30 MHz.
+    "_toneMaxKhz=s.si5351_active?145000:30000;"
+    "document.getElementById('tone_freq').max=_toneMaxKhz;"
+    "document.getElementById('meas_freq').max=_toneMaxKhz;"
     // update GPS button state from status poll.
     // gps_active is true when the time source is GPS (auto-detected at boot).
     "updateGpsBtn(!!s.gps_active);"
@@ -728,7 +739,10 @@ static const char INDEX_HTML[] =
     "toast('" WEBUI_JS_RESTARTING "','warn');"
     "setTimeout(()=>location.reload(),4000);}"
 
-    "loadCfg();setInterval(pollStatus,2000);"
+    // call pollStatus() immediately at page load so _toneMaxKhz and
+    // input max attributes are set to the correct hw-specific ceiling before the
+    // user can interact with the tone test button (was: first poll after 2 s).
+    "loadCfg();pollStatus();setInterval(pollStatus,2000);"
     "</script></body></html>";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -747,6 +761,7 @@ typedef struct {
     char hw_name[32];
     char reboot_time_str[32];
     char reboot_reason[32];
+    bool si5351_active;
 } wspr_status_t;
 
 static wspr_status_t _status = { 0 };
@@ -776,8 +791,12 @@ void web_server_update_status(bool time_ok, const char *time_str, const char *ba
 }
 
 void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
+    // detect Si5351A by hw_name prefix so the web UI can raise the
+    // tone test frequency ceiling to 145 MHz (vs 30 MHz for AD9850/DUMMY)
+    bool is_si5351 = hw_name && (strncmp(hw_name, "Si5351", 6) == 0);
     if (_status_mutex == NULL) {
         _status.hw_ok = hw_ok;
+        _status.si5351_active = is_si5351;
         if (hw_name) {
             strncpy(_status.hw_name, hw_name, sizeof(_status.hw_name) - 1);
             _status.hw_name[sizeof(_status.hw_name) - 1] = '\0';
@@ -789,12 +808,13 @@ void web_server_set_hw_status(bool hw_ok, const char *hw_name) {
         return;
     }
     _status.hw_ok = hw_ok;
+    _status.si5351_active = is_si5351;
     if (hw_name) {
         strncpy(_status.hw_name, hw_name, sizeof(_status.hw_name) - 1);
         _status.hw_name[sizeof(_status.hw_name) - 1] = '\0';
     }
     xSemaphoreGive(_status_mutex);
-    ESP_LOGI(TAG, "HW status: %s -- %s", hw_ok ? "OK" : "DUMMY", _status.hw_name);
+    ESP_LOGI(TAG, "HW status: %s -- %s (si5351=%d)", hw_ok ? "OK" : "DUMMY", _status.hw_name, (int)is_si5351);
 }
 
 void web_server_set_reboot_info(const char *boot_time_str, const char *reason_str) {
@@ -1082,7 +1102,7 @@ static esp_err_t h_tx_toggle(httpd_req_t *req) {
 
 // handler: POST /api/tone_toggle
 // Activates or deactivates tone test mode.
-// Request body (JSON): {"freq_khz": <float 0.1-30000>, "active": <bool>}
+// Request body (JSON): {"freq_khz": <float 0.1-30000 (AD9850) | 0.1-145000 (Si5351A)>, "active": <bool>}
 // Response (JSON): {"tone_active": <bool>, "freq_khz": <float>}
 // When active=true the scheduler immediately outputs a CW carrier at freq_khz
 // and suspends all WSPR scheduling until active=false is sent.
@@ -1116,11 +1136,19 @@ static esp_err_t h_tone_toggle(httpd_req_t *req) {
             new_freq = (float)v->valuedouble;
         cJSON_Delete(j);
     }
-    // Clamp to safe oscillator range
+    // Clamp to safe oscillator range — Si5351A supports up to ~145 MHz,
+    // AD9850/DUMMY are limited to 30 MHz. Read si5351_active under status mutex.
+    float tone_max_khz;
+    if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        tone_max_khz = _status.si5351_active ? 145000.0f : 30000.0f;
+        xSemaphoreGive(_status_mutex);
+    } else {
+        tone_max_khz = 30000.0f; // safe default if mutex unavailable
+    }
     if (new_freq < 0.1f)
         new_freq = 0.1f;
-    if (new_freq > 30000.0f)
-        new_freq = 30000.0f;
+    if (new_freq > tone_max_khz)
+        new_freq = tone_max_khz;
     web_server_cfg_lock();
     _cfg->tone_active = new_active;
     _cfg->tone_freq_khz = new_freq;
@@ -1151,6 +1179,7 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON *j = cJSON_CreateObject();
     cJSON_AddBoolToObject(j, "hw_ok", snap.hw_ok);
     cJSON_AddStringToObject(j, "hw_name", snap.hw_name[0] ? snap.hw_name : "---");
+    cJSON_AddBoolToObject(j, "si5351_active", snap.si5351_active);
     cJSON_AddBoolToObject(j, "time_ok", snap.time_ok);
     cJSON_AddStringToObject(j, "time_str", snap.time_str);
     cJSON_AddStringToObject(j, "band", snap.band);
