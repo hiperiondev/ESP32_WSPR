@@ -231,18 +231,32 @@ esp_err_t config_load(wspr_config_t *cfg) {
 }
 
 esp_err_t config_save(const wspr_config_t *cfg) {
-    // Write the entire config struct as a single NVS blob for atomic persistence
+    // Make a sanitized copy with all runtime-only fields zeroed before
+    // persisting. Without this, a call to config_save() while tone_active=true (e.g.
+    // the user saves config during a tone test) would write tone_active=true and a
+    // non-zero tone_freq_khz to NVS. Although config_load() already resets these on
+    // boot, the blob on flash would contain garbage runtime state that confuses future
+    // schema migrations and produces misleading NVS dumps.
+    // tx_slot_parity is also zeroed so the Type-2/Type-3 alternation always starts
+    // cleanly from the Type-2 frame after a reboot.
+    wspr_config_t save_cfg = *cfg;
+    save_cfg.bands_changed = false; // runtime: band-list rebuild flag
+    save_cfg.tx_slot_parity = 0;    // runtime: Type-2/Type-3 alternation state
+    save_cfg.tone_active = false;   // runtime: tone test in progress
+    save_cfg.tone_freq_khz = 0.0f;  // runtime: tone test frequency
+
+    // Write the sanitized copy as a single NVS blob for atomic persistence
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK)
         return err;
 
-    err = nvs_set_blob(h, "cfg", cfg, sizeof(*cfg));
+    err = nvs_set_blob(h, "cfg", &save_cfg, sizeof(save_cfg));
     if (err == ESP_OK)
         err = nvs_commit(h); // flush to flash before closing
     nvs_close(h);
 
-    ESP_LOGI(TAG, "Config saved: cs=%s loc=%s pwr=%d dBm region=%d", cfg->callsign, cfg->locator, cfg->power_dbm, (int)cfg->iaru_region);
+    ESP_LOGI(TAG, "Config saved: cs=%s loc=%s pwr=%d dBm region=%d", save_cfg.callsign, save_cfg.locator, save_cfg.power_dbm, (int)save_cfg.iaru_region);
     return err;
 }
 

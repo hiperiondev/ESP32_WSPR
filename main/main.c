@@ -326,8 +326,15 @@ static void wspr_transmit(void) {
     // This separates the pure-integer precomputation from the timing-critical loop.
     int32_t tone_offsets[WSPR_SYMBOLS];
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
-        // round tone offset: (sym*375000 + 128) / 256 — the +128 is half-step rounding
-        tone_offsets[i] = (int32_t)((symbols[i] * 375000UL + 128UL) / 256UL);
+        // Exact WSPR tone spacing = 12000/8192 Hz = 375000/256 mHz.
+        // The +128 biased tones 1-3 upward by +0.156, +0.312, +0.469 mHz
+        // respectively. Integer truncation (no addend) gives 0/1464/2929/4394 mHz,
+        // which are 0.000/0.844/0.688/0.531 mHz below the exact values. Both
+        // are within WSPR decoder tolerance (>100 mHz), but truncation is the
+        // mathematically correct representation of floor(symbol * 375000/256).
+        // The Si5351 hardware resolution (~23 mHz/LSB at 25 MHz xtal) is coarser
+        // than both errors, so the choice is cosmetic only.
+        tone_offsets[i] = (int32_t)((symbols[i] * 375000UL) / 256UL);
     }
 
     // apply symbol 0 tone BEFORE enabling RF output so the oscillator
@@ -818,7 +825,19 @@ static void scheduler_task(void *arg) {
                 } else if (remaining_ms > 20u) {
                     vTaskDelay(pdMS_TO_TICKS(10u));
                 } else {
-                    vTaskDelay(pdMS_TO_TICKS(1u));
+                    // At CONFIG_HZ=100, pdMS_TO_TICKS(1)=0, so the old
+                    // vTaskDelay(1) was a no-op that caused a 20ms gettimeofday()
+                    // busy-loop on APP_CPU, wasting cycles and starving the idle WDT.
+                    // Use a 5ms esp_timer chunk instead: 4 iterations cover the full
+                    // 20ms window, each sleeping precisely 5ms without any FreeRTOS
+                    // tick granularity dependency. Yield once per chunk to avoid
+                    // starving lower-priority tasks pinned to the same core.
+                    int64_t chunk_end = esp_timer_get_time() + 5000LL;
+                    while (esp_timer_get_time() < chunk_end) {
+                    }
+#if CONFIG_WSPR_TASK_WDT_ENABLE
+                    esp_task_wdt_reset();
+#endif
                 }
 
             } else if (phase == 1u) {

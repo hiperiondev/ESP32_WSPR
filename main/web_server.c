@@ -318,6 +318,14 @@ static const char INDEX_HTML[] =
     "<div class='status-row'><span>" WEBUI_STATUS_NEXT_LABEL "</span><span id='s_next'>---</span></div>"
     "<div class='status-row'><span>" WEBUI_STATUS_TX_LABEL "</span><span id='s_tx'><span class='badge err'>OFF</span></span></div>"
     "<div class='status-row'><span>" WEBUI_STATUS_SYM_LABEL "</span><span id='s_sym'>---</span></div>"
+    // Locator truncation notice row — hidden by default, shown
+    // by pollStatus() JS when the server reports loc_truncated=true
+    // (simple callsign + 6-char locator: Type-3 companion suppressed to avoid
+    // phantom WSPRnet spots, so only the first 4 chars of the locator are sent).
+    "<div class='status-row' id='loc_note_row' style='display:none'>"
+    "<span>" WEBUI_STATUS_LOC_NOTE_LABEL "</span>"
+    "<span id='s_loc_note' class='badge warn'></span>"
+    "</div>"
     "</div>"
     "<div style='margin-top:12px;text-align:center'>"
     // default href points to PSKReporter map (updated by loadCfg() with full URL)
@@ -642,6 +650,15 @@ static const char INDEX_HTML[] =
     "document.getElementById('s_tx').innerHTML=s.tx_active?"
     "`<span class='badge ok'>ON</span>`:`<span class='badge err'>OFF</span>`;"
     "document.getElementById('s_sym').textContent=s.tx_active?(s.symbol_idx+'/162'):'---';"
+    // Show a visible warning when a 6-char locator + simple callsign
+    // is configured: Type-3 companion is suppressed, so only the first 4 chars are
+    // transmitted. The user may not realise the sub-square precision is not on-air.
+    "if(s.loc_truncated){"
+    "document.getElementById('loc_note_row').style.display='';"
+    "document.getElementById('s_loc_note').textContent='" WEBUI_JS_LOC_TRUNCATED_NOTE "';"
+    "}else{"
+    "document.getElementById('loc_note_row').style.display='none';"
+    "}"
     "updateTxBtn(s.tx_enabled);"
     // Sync tone button state from status response
     // also store the nominal tone frequency for autoCalibrate()
@@ -1200,11 +1217,25 @@ static esp_err_t h_status(httpd_req_t *req) {
     web_server_cfg_lock();
     bool tone_active_snap = _cfg ? _cfg->tone_active : false;
     float tone_freq_snap = _cfg ? _cfg->tone_freq_khz : 0.0f;
+    // Detect simple-callsign + 6-char-locator combination.
+    // In this case wspr_transmit() silently truncates the locator to 4 chars
+    // (Type-3 companion suppressed to avoid phantom spots on WSPRnet).
+    // Expose this as a boolean flag so the web UI can warn the user that the
+    // configured 6-char sub-square precision is NOT being transmitted.
+    bool loc_truncated = false;
+    if (_cfg) {
+        size_t loc_len = strlen(_cfg->locator);
+        bool is_compound = (strchr(_cfg->callsign, '/') != NULL);
+        // 6-char locator + simple callsign: Type-3 companion suppressed
+        loc_truncated = (loc_len == 6u) && !is_compound;
+    }
     web_server_cfg_unlock();
     cJSON_AddBoolToObject(j, "tone_active", tone_active_snap);
     char _tone_freq_str[24];
     snprintf(_tone_freq_str, sizeof(_tone_freq_str), "%.3f", (double)tone_freq_snap);
     cJSON_AddRawToObject(j, "tone_freq_khz", _tone_freq_str);
+    // Expose locator truncation flag so the UI can warn the user
+    cJSON_AddBoolToObject(j, "loc_truncated", loc_truncated);
     char *s = cJSON_PrintUnformatted(j);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, s, strlen(s));

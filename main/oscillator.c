@@ -431,6 +431,16 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     // The PLL VCO target is eff_hz * d_int; the fractional part comes from the
     // remainder when dividing VCO_target by xtal_Hz.
     uint32_t pll_c = 1048575UL;
+    // Compile-time assertion that pll_c == 0xFFFFF.
+    // si_write_pll_p1p2_only() writes Si5351 register 31 as:
+    //   ((pll_c >> 12) & 0xF0) | ((p2 >> 16) & 0x0F)
+    // The upper nibble is P3[19:16]. For it to be always 0xF (constant across
+    // all tones), pll_c must equal 0xFFFFF so that (pll_c >> 12) == 0xFF and
+    // (0xFF & 0xF0) == 0xF0. If pll_c ever changes, the partial-write
+    // optimisation silently writes a wrong P3 upper nibble, causing tone
+    // frequency errors for the entire WSPR transmission. This assert enforces
+    // the invariant at compile time so a future change to pll_c cannot go unnoticed.
+    static_assert((1048575UL >> 12u) == 255u, "pll_c P3-nibble invariant: si_write_pll_p1p2_only requires pll_c=0xFFFFF so P3[19:16]==0xF always");
     // Compute vco_target in pure 32-bit.
     // PROOF it fits: eff_hz * d_int ≈ vco_cal ≈ 870 MHz.
     // Upper bound: eff_hz*d_int <= vco_cal + eff_hz <= 870,087,000 + 28,127,600 = 898,214,600

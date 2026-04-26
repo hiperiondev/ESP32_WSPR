@@ -18,11 +18,18 @@
 // Station card
 #define WEBUI_CARD_STATION_TITLE "Station"
 #define WEBUI_LABEL_CALLSIGN     "Callsign"
-#define WEBUI_LABEL_LOCATOR      "Maidenhead Locator (4 or 6 char.)"
-#define WEBUI_LABEL_POWER        "TX Power (dBm)"
-#define WEBUI_LABEL_XTAL_CAL     "XTAL Calibration (ppb)"
-#define WEBUI_HINT_XTAL_CAL      "Crystal offset in ppb. 0=no correction."
-#define WEBUI_BTN_SAVE           "&#128190; Save configuration"
+// Clarify that 6-char locators are stored but only 4 chars are
+// transmitted (Type-3 companion suppressed to avoid phantom WSPRnet spots).
+#define WEBUI_LABEL_LOCATOR "Maidenhead Locator (4 char. recommended; 6 char. stored but only 4 transmitted)"
+// Status panel label for the locator-truncation notice row
+#define WEBUI_STATUS_LOC_NOTE_LABEL "Locator precision"
+// JS badge text shown inside the loc_note_row when loc_truncated is true.
+// Kept short to fit inside the narrow badge widget.
+#define WEBUI_JS_LOC_TRUNCATED_NOTE "6-char stored, 4-char TX (Type-3 suppressed)"
+#define WEBUI_LABEL_POWER           "TX Power (dBm)"
+#define WEBUI_LABEL_XTAL_CAL        "XTAL Calibration (ppb)"
+#define WEBUI_HINT_XTAL_CAL         "Crystal offset in ppb. 0=no correction."
+#define WEBUI_BTN_SAVE              "&#128190; Save configuration"
 
 // "From GPS" button label — shown to the right of the Maidenhead locator input.
 // Button is enabled when GPS module is detected, disabled when NTP mode is active.
