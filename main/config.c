@@ -24,10 +24,11 @@ static const char *TAG = "config";
 // Set to true when config_load() falls back to defaults due to schema mismatch
 static bool _was_reset = false;
 
-// WSPR dial frequencies in Hz, indexed as [iaru_region - 1][wspr_band_t].
-// All bands are identical worldwide except 60 m, which differs per IARU region
-// to avoid interference with local secondary services in each ITU zone.
-// Source: IARU Region 1/2/3 band plans and WSPR operating conventions.
+// WRC-15 new 5 MHz allocation (5 351.5 - 5 366.5 kHz): in countries that have
+// adopted WRC-15 the preferred WSPR dial has shifted to 5 364 700 Hz
+// (RF center 5 366 200 Hz). This is not yet globally adopted and is not
+// represented as a region preset here; users should configure it manually
+// until a fourth region entry is warranted.
 const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     // -- Region 1: Europe, Africa, Middle East --
     {
@@ -35,7 +36,7 @@ const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
         475700UL,   // 630m
         1838100UL,  // 160m
         3570100UL,  // 80m
-        5288600UL,  // 60m  <-- Region 1 specific
+        5288700UL,  // 60m  <-- 5287200 + 1500 Hz
         7040100UL,  // 40m
         10140200UL, // 30m
         14097100UL, // 20m
@@ -50,7 +51,7 @@ const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
         475700UL,   // 630m
         1838100UL,  // 160m
         3570100UL,  // 80m
-        5346500UL,  // 60m  <-- Region 2 specific (FCC / ARRL coordination)
+        5288700UL,  // 60m  <-- 5287200 + 1500 Hz
         7040100UL,  // 40m
         10140200UL, // 30m
         14097100UL, // 20m
@@ -65,7 +66,7 @@ const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
         475700UL,   // 630m
         1838100UL,  // 160m
         3570100UL,  // 80m
-        5367000UL,  // 60m  <-- Region 3 specific (WIA/JARL coordination)
+        5288700UL,  // 60m  <-- 5287200 + 1500 Hz
         7040100UL,  // 40m
         10140200UL, // 30m
         14097100UL, // 20m
@@ -202,11 +203,25 @@ esp_err_t config_load(wspr_config_t *cfg) {
     if (cfg->hop_interval_sec < 120u)
         cfg->hop_interval_sec = 120u;
 
-    // Runtime-only fields: always start fresh, do not persist across reboots
+    // Snap hop_interval_sec to the nearest multiple of 120 s
+    // at load time so the hopping timer always aligns with even-minute UTC boundaries.
+    // A hop interval of e.g. 300 s (not a multiple of 120) would cause hops at
+    // arbitrary offsets within the 2-minute cycle, wasting partial TX slots.
+    cfg->hop_interval_sec = ((cfg->hop_interval_sec + 60u) / 120u) * 120u;
+    if (cfg->hop_interval_sec < 120u)
+        cfg->hop_interval_sec = 120u;
+
+    // Unconditionally reset ALL runtime-only fields
+    // AFTER loading the blob. config_save() stores the entire struct including
+    // runtime fields (tone_active, tone_freq_khz, tx_slot_parity, bands_changed).
+    // If config_save() was called while tone_active=true, the next boot would
+    // restore tone_active=true and potentially output a carrier immediately.
+    // tone_freq_khz was also not previously reset here, which could cause the
+    // scheduler to output a stale tone frequency from the previous session.
     cfg->bands_changed = false;
     cfg->tx_slot_parity = 0;
     cfg->tone_active = false;
-    cfg->tone_freq_khz = 0.0f;
+    cfg->tone_freq_khz = 0.0f; // prevents stale tone frequency
 
     ESP_LOGI(TAG,
              "Config loaded:\n  Call Sign=%s\n  Locator=%s\n  TX Power=%d dBm\n  XTAL Calibration=%ld ppb\n  IARU Region=%d\n  Frequency hopping(%s):%usec",
