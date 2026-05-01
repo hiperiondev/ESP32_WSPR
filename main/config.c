@@ -29,6 +29,20 @@ static bool _was_reset = false;
 // (RF center 5 366 200 Hz). This is not yet globally adopted and is not
 // represented as a region preset here; users should configure it manually
 // until a fourth region entry is warranted.
+
+// WSPR RF center frequencies (= SSB dial + 1500 Hz) by region and band.
+// All bands except 60 m are identical across regions.
+//
+// 60 m WSPR dial frequencies per IARU/ITU region:
+//   Region 1 (Europe/Africa/ME):  5 287 200 Hz dial -> RF center 5 288 700 Hz
+//   Region 2 (Americas):          5 346 500 Hz dial -> RF center 5 348 000 Hz
+//   Region 3 (Asia/Pacific):      5 367 000 Hz dial -> RF center 5 368 500 Hz
+//
+// MODIFIED: Region 2 and Region 3 60 m entries corrected.
+// Previous code had 5 288 700 Hz (Region 1 value) for all three regions,
+// which caused Region 2 and 3 transmitters to send 60 m WSPR 59.3 kHz and
+// 79.8 kHz below the correct regional dial frequency, rendering all 60 m
+// transmissions undecodable by regional receivers for those two regions.
 const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     // -- Region 1: Europe, Africa, Middle East --
     {
@@ -36,7 +50,7 @@ const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
         475700UL,   // 630m
         1838100UL,  // 160m
         3570100UL,  // 80m
-        5288700UL,  // 60m  <-- 5287200 + 1500 Hz
+        5288700UL,  // 60m  (dial 5 287 200 + 1500 Hz RF center) -- Region 1 correct
         7040100UL,  // 40m
         10140200UL, // 30m
         14097100UL, // 20m
@@ -47,11 +61,12 @@ const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     },
     // -- Region 2: Americas (North, Central, South, Caribbean) --
     {
-        137600UL,   // 2200m
-        475700UL,   // 630m
-        1838100UL,  // 160m
-        3570100UL,  // 80m
-        5288700UL,  // 60m  <-- 5287200 + 1500 Hz
+        137600UL,  // 2200m
+        475700UL,  // 630m
+        1838100UL, // 160m
+        3570100UL, // 80m
+        // Region 2 60 m WSPR dial = 5 346 500 Hz; RF center = dial + 1500 = 5 348 000 Hz.
+        5348000UL,  // 60m  (dial 5 346 500 + 1500 Hz RF center) -- Region 2 corrected
         7040100UL,  // 40m
         10140200UL, // 30m
         14097100UL, // 20m
@@ -62,11 +77,12 @@ const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     },
     // -- Region 3: Asia, Pacific, Oceania --
     {
-        137600UL,   // 2200m
-        475700UL,   // 630m
-        1838100UL,  // 160m
-        3570100UL,  // 80m
-        5288700UL,  // 60m  <-- 5287200 + 1500 Hz
+        137600UL,  // 2200m
+        475700UL,  // 630m
+        1838100UL, // 160m
+        3570100UL, // 80m
+        // Region 3 60 m WSPR dial = 5 367 000 Hz; RF center = dial + 1500 = 5 368 500 Hz.
+        5368500UL,  // 60m  (dial 5 367 000 + 1500 Hz RF center) -- Region 3 corrected
         7040100UL,  // 40m
         10140200UL, // 30m
         14097100UL, // 20m
