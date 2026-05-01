@@ -43,13 +43,17 @@ static const char *TAG = "wspr_main";
 #define WSPR_TONE_NUM 375000UL // tone numerator: spacing_mHz * 256
 #define WSPR_TONE_DEN 256UL    // tone denominator
 
-// Exact WSPR symbol period: 8192/12000 s = 682666.666... us
-// Expressed as: each symbol adds 682666 us plus 2/3 us fractional part.
-// After 3 symbols the accumulated fraction equals exactly 2 us (3 * 2/3 = 2),
-// so the long-term average is exact with zero drift over 162 symbols.
-#define WSPR_SYM_PERIOD_US_INT   682666LL // integer part of symbol period in us
-#define WSPR_SYM_PERIOD_FRAC_NUM 2LL      // fractional numerator: 2/3 us per symbol
-#define WSPR_SYM_PERIOD_FRAC_DEN 3LL      // fractional denominator
+// Exact WSPR symbol period closed-form constant.
+// One symbol period = 8192/12000 s = 2048000/3 us = 682666.666... us.
+// The cumulative deadline for end of symbol i (0-indexed) is:
+//   end_us = tx_start_us + (i+1) * 2048000 / 3   (integer division, 64-bit)
+// Proof of exactness: 162 * 2048000 = 331776000; 331776000 / 3 = 110592000 us exactly.
+// The old fractional accumulator approach (682666 * n + floor(2n/3)) was WRONG:
+// it added only the per-step carry to end_of_sym_us instead of the cumulative carry,
+// causing symbol boundaries to drift by up to -2 us every 3 symbols (-54 us by
+// symbol 161). The closed-form (n*2048000)/3 is always correct with no accumulator.
+#define WSPR_SYM_PERIOD_NUM 2048000LL // numerator of exact symbol period in us (2048000/3)
+#define WSPR_SYM_PERIOD_DEN 3LL       // denominator of exact symbol period in us
 
 // I2C write lead time for Si5351 tone pre-load.
 // At 400 kHz, writing 6 bytes takes approximately:
@@ -349,11 +353,12 @@ static void wspr_transmit(void) {
     // eliminates any theoretical wrap-around ambiguity over long uptimes.
     int64_t tx_start_us = esp_timer_get_time();
 
-    // Fractional accumulator for the 2/3 us per-symbol
-    // fractional part of the WSPR symbol period (682666.666... us).
-    // frac_accum counts accumulated thirds; every 3 symbols we get +2 us extra.
-    // This gives bit-exact timing across all 162 symbols with zero long-term drift.
-    int64_t frac_accum = 0;
+    // Use the exact closed-form symbol deadline:
+    //   end_of_sym_us = tx_start_us + (i+1) * 2048000 / 3
+    // No fractional accumulator needed. The old frac_accum approach was buggy:
+    // it added only the per-step carry to end_of_sym_us instead of the running
+    // cumulative carry, causing symbol boundaries to drift -1 us every 3 symbols.
+    // This variable has been intentionally removed.
 
     // ── TX timing diagnostic ──
     struct timeval tv_tx;
@@ -363,12 +368,16 @@ static void wspr_transmit(void) {
     uint32_t tx_sec = (uint32_t)(tv_tx.tv_sec % 120u); // phase within 2-min cycle
     uint32_t tx_usec = (uint32_t)tv_tx.tv_usec;
 
-    // Classify alignment quality for easy log grepping
+    // align_verdict thresholds updated to match the 500 ms window.
+    // Slots up to 500 ms late are now accepted; the old 50 ms OK / 200 ms LATE
+    // thresholds are replaced to reflect what the scheduler actually permits.
     const char *align_verdict;
     if (tx_sec == 1u && tx_usec < 50000u)
         align_verdict = "OK";
     else if (tx_sec == 1u && tx_usec < 200000u)
-        align_verdict = "LATE_USEC";
+        align_verdict = "LATE_MINOR";
+    else if (tx_sec == 1u && tx_usec < 500000u)
+        align_verdict = "LATE_ACCEPTED"; // within 500 ms window, decoder can handle
     else if (tx_sec == 0u)
         align_verdict = "EARLY";
     else if (tx_sec >= 2u && tx_sec <= 4u)
@@ -419,14 +428,14 @@ static void wspr_transmit(void) {
         esp_task_wdt_reset();
 #endif
 
-        // Compute the exact deadline for the END of symbol i
-        // using 64-bit arithmetic and the fraction accumulator.
-        // Symbol period = 682666 + 2/3 us. Each symbol adds WSPR_SYM_PERIOD_FRAC_NUM
-        // to frac_accum; when frac_accum reaches WSPR_SYM_PERIOD_FRAC_DEN we add 1 us.
-        frac_accum += WSPR_SYM_PERIOD_FRAC_NUM;
-        int64_t extra_us = frac_accum / WSPR_SYM_PERIOD_FRAC_DEN;
-        frac_accum %= WSPR_SYM_PERIOD_FRAC_DEN;
-        int64_t end_of_sym_us = tx_start_us + (int64_t)(i + 1) * WSPR_SYM_PERIOD_US_INT + extra_us;
+        // Compute the exact end-of-symbol deadline using the
+        // closed-form integer formula: (i+1) * 2048000 / 3.
+        // This is exact for every symbol index because 2048000 = 3 * 682666 + 2,
+        // and the numerator (i+1)*2048000 is always divisible by 3 at multiples
+        // of 3, landing on exact microsecond boundaries every 3 symbols.
+        // Maximum floor-truncation error per symbol: < 1 us (fractional part of
+        // non-multiple-of-3 positions). No accumulator, no drift, O(1) per symbol.
+        int64_t end_of_sym_us = tx_start_us + (int64_t)((int64_t)(i + 1) * WSPR_SYM_PERIOD_NUM / WSPR_SYM_PERIOD_DEN);
 
         if (i + 1 < WSPR_SYMBOLS) {
             // Pre-load the next tone BEFORE the symbol boundary.
@@ -470,8 +479,10 @@ static void wspr_transmit(void) {
         }
 
 #if CONFIG_WSPR_SYMBOL_OVERRUN_LOG
+        // Deadline_us now uses the same closed-form as end_of_sym_us.
+        // extra_us variable has been removed; the deadline is (i+1)*2048000/3.
         int64_t actual_us = esp_timer_get_time() - tx_start_us;
-        int64_t deadline_us = (int64_t)(i + 1) * WSPR_SYM_PERIOD_US_INT + extra_us;
+        int64_t deadline_us = (int64_t)((int64_t)(i + 1) * WSPR_SYM_PERIOD_NUM / WSPR_SYM_PERIOD_DEN);
         if (actual_us > deadline_us + 10000LL) {
             ESP_LOGW(TAG, "Symbol %d overrun: deadline=%lld actual=%lld overrun=%lld us", i, (long long)deadline_us, (long long)actual_us,
                      (long long)(actual_us - deadline_us));
@@ -545,6 +556,19 @@ static void scheduler_task(void *arg) {
     if (wdt_err != ESP_OK)
         ESP_LOGW(TAG, "WDT add failed (%s) -- watchdog not active for scheduler task", esp_err_to_name(wdt_err));
 #endif
+    // TX start alignment window: 500 ms centred on second :01.
+    // The WSPR spec requires TX at second :01 of each even UTC minute. WSJT-X
+    // decoders tolerate DT offsets of +-1.5 s; 500 ms is conservative and
+    // easily accommodates NTP jitter on embedded hardware (typical +-10..100 ms).
+    // The old 50 ms hard limit caused false slot-skips whenever an NTP step
+    // correction or scheduler preemption pushed tv_usec past 50000 at check time.
+    // The window is intentionally one-sided (0..500 ms late) because we cannot
+    // start early - we wait for the second rollover before calling wspr_transmit().
+#define WSPR_TX_START_WINDOW_US 500000LL // 500 ms late is acceptable
+    // [MODIFIED - FIX 2] Count consecutive skipped slots to detect persistent
+    // sync problems and force a time-sync log warning after 3 missed slots.
+#define WSPR_MAX_CONSECUTIVE_SKIPS 3
+    int s_consecutive_skips = 0;
     // Initial band selection: build the active list and choose the first band
     select_next_band(false, true);
 
@@ -900,10 +924,12 @@ static void scheduler_task(void *arg) {
                 // Compute microseconds already elapsed into second :01
                 int64_t usec_into_sec = (int64_t)tv_sub.tv_usec;
 
-                // If we are more than 50 ms into second :01, the alignment window
-                // has been missed. Skip this slot to avoid a late start.
-                if (usec_into_sec >= 50000LL) {
-                    ESP_LOGW(TAG, "Sub-second spin: already %.1f ms into sec:01 -- slot skipped", (double)usec_into_sec / 1000.0);
+                // Widen the acceptable TX start window to 500 ms.
+                // WSJT-X decoders tolerate DT offsets of up to +-1.5 s; 500 ms is
+                // a safe, conservative limit that avoids the NTP-jitter false-skip
+                // problem while still rejecting genuinely mis-timed slots.
+                if (usec_into_sec >= WSPR_TX_START_WINDOW_US) {
+                    ESP_LOGW(TAG, "Sub-second spin: already %.1f ms into sec:01 (>500 ms window) -- slot skipped", (double)usec_into_sec / 1000.0);
                     g_pre_armed = false;
                     g_pre_arm_base_hz = 0;
                     do_skip = true;
@@ -938,24 +964,23 @@ static void scheduler_task(void *arg) {
 
             sub_spin_done:;
 
-                // Post-spin verify: confirm we are still within the valid TX window.
-                // Check both phase and sub-second offset using gettimeofday().
+                // Post-spin verify uses the same 500 ms window.
                 if (!do_skip) {
                     struct timeval tv_verify;
                     gettimeofday(&tv_verify, NULL);
                     uint32_t verify_phase = (uint32_t)(tv_verify.tv_sec % 120u);
-                    if (verify_phase != 1u || (uint32_t)tv_verify.tv_usec >= 50000u) {
-                        // Phase has rolled past :01 or usec window was missed
+                    if (verify_phase != 1u || (int64_t)tv_verify.tv_usec >= WSPR_TX_START_WINDOW_US) {
+                        // Phase has rolled past :01 or the 500 ms window was missed
                         ESP_LOGW(TAG,
                                  "Sub-second spin exited outside window: phase=%lu usec=%lu "
-                                 "(expected phase=1 usec<50000) -- slot skipped",
+                                 "(expected phase=1 usec<500000) -- slot skipped",
                                  (unsigned long)verify_phase, (unsigned long)tv_verify.tv_usec);
                         g_pre_armed = false;
                         g_pre_arm_base_hz = 0;
                         do_skip = true;
                     }
                 }
-                // phase==1 and usec<50000: alignment is good, proceed with TX
+                // phase==1 and usec<500000: alignment is within window, proceed with TX
 
                 break; // exit the outer fine-alignment for(;;) loop
             } else if (phase >= 2u && phase <= 4u) {
@@ -990,6 +1015,19 @@ static void scheduler_task(void *arg) {
         }
 
         if (do_skip) {
+            // Track consecutive skipped slots.
+            // Three consecutive skips indicates a persistent time-sync or alignment
+            // problem (e.g. NTP not converging, GPS signal lost). Log a warning so
+            // the operator can diagnose the issue from the serial log.
+            s_consecutive_skips++;
+            if (s_consecutive_skips >= WSPR_MAX_CONSECUTIVE_SKIPS) {
+                ESP_LOGW(TAG,
+                         "TX SYNC WARNING: %d consecutive slots skipped -- "
+                         "check NTP/GPS time sync accuracy. "
+                         "time_ok=%d source=%d",
+                         s_consecutive_skips, (int)time_sync_is_ready(), (int)time_sync_source());
+                s_consecutive_skips = 0; // reset counter after warning to avoid log spam
+            }
 #if CONFIG_WSPR_TASK_WDT_ENABLE
             esp_task_wdt_reset();
 #endif
@@ -1026,6 +1064,8 @@ static void scheduler_task(void *arg) {
             continue;
         }
 
+        // Reset consecutive-skip counter: this slot aligned OK.
+        s_consecutive_skips = 0;
         // All checks passed: encode and transmit the WSPR message for this slot
         wspr_transmit();
     }
