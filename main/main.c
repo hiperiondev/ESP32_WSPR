@@ -35,13 +35,15 @@
 
 static const char *TAG = "wspr_main";
 
-// WSPR tone spacing: 12000/8192 Hz = 1.4648 Hz per tone step.
-// Represented as numerator/denominator to avoid floating-point at runtime.
-// The oscillator driver receives offsets in milli-Hz, so:
-//   tone_offset_mHz = symbol_value * 375000 / 256
-// which equals symbol_value * 1464.844 mHz, matching the WSPR specification.
-#define WSPR_TONE_NUM 375000UL // tone numerator: spacing_mHz * 256
-#define WSPR_TONE_DEN 256UL    // tone denominator
+// WSPR tone spacing: exact rational = 12000/8192 Hz per symbol.
+// In milli-Hz: 12000 * 1000 / 8192 = 12000000/8192 = 1464.84375 mHz/symbol.
+// Rounding formula: tone_mHz[s] = (s * WSPR_TONE_SPACING_NUM + WSPR_TONE_SPACING_DEN/2) / WSPR_TONE_SPACING_DEN
+// Results (rounded-to-nearest): s=0->0, s=1->1465, s=2->2930, s=3->4395 mHz.
+// The 1 mHz per non-zero tone is below Si5351 hardware resolution
+// (~24 mHz/LSB at 25 MHz xtal) and below AD9850 resolution (~29 mHz/LSB at
+// 125 MHz ref), so there is no audible difference, but rounding is exact.
+#define WSPR_TONE_SPACING_NUM 12000000ULL // mHz numerator (12000 Hz * 1000 mHz/Hz)
+#define WSPR_TONE_SPACING_DEN 8192ULL     // denominator (WSPR baud-rate divisor)
 
 // Exact WSPR symbol period closed-form constant.
 // One symbol period = 8192/12000 s = 2048000/3 us = 682666.666... us.
@@ -340,15 +342,15 @@ static void wspr_transmit(void) {
     // This separates the pure-integer precomputation from the timing-critical loop.
     int32_t tone_offsets[WSPR_SYMBOLS];
     for (int i = 0; i < WSPR_SYMBOLS; i++) {
-        // Exact WSPR tone spacing = 12000/8192 Hz = 375000/256 mHz.
-        // The +128 biased tones 1-3 upward by +0.156, +0.312, +0.469 mHz
-        // respectively. Integer truncation (no addend) gives 0/1464/2929/4394 mHz,
-        // which are 0.000/0.844/0.688/0.531 mHz below the exact values. Both
-        // are within WSPR decoder tolerance (>100 mHz), but truncation is the
-        // mathematically correct representation of floor(symbol * 375000/256).
-        // The Si5351 hardware resolution (~23 mHz/LSB at 25 MHz xtal) is coarser
-        // than both errors, so the choice is cosmetic only.
-        tone_offsets[i] = (int32_t)((symbols[i] * 375000UL) / 256UL);
+        // 64-bit half-up rounding for mathematically exact WSPR tone offsets.
+        // Exact spacing = 12000/8192 Hz = WSPR_TONE_SPACING_NUM/WSPR_TONE_SPACING_DEN mHz.
+        // The addend WSPR_TONE_SPACING_DEN/2 = 4096 implements round-half-up:
+        //   s=0 -> (0+4096)/8192 = 0 mHz  (exact: 0.000)
+        //   s=1 -> (12000000+4096)/8192 = 1465 mHz  (exact: 1464.844, rounds up)
+        //   s=2 -> (24000000+4096)/8192 = 2930 mHz  (exact: 2929.688, rounds up)
+        //   s=3 -> (36000000+4096)/8192 = 4395 mHz  (exact: 4394.531, rounds up)
+        // No overflow: max numerator = 3*12000000+4096 = 36004096 < 2^26, fits uint64_t.
+        tone_offsets[i] = (int32_t)(((uint64_t)symbols[i] * WSPR_TONE_SPACING_NUM + WSPR_TONE_SPACING_DEN / 2ULL) / WSPR_TONE_SPACING_DEN);
     }
 
     // apply symbol 0 tone BEFORE enabling RF output so the oscillator
