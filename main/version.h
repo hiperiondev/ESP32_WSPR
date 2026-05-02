@@ -14,7 +14,7 @@
  * @par Semantic versioning
  * The version number follows the Semantic Versioning 2.0.0 scheme
  * (https://semver.org/):
- *  - @ref VERSION_MAYOR (MAJOR): incremented for incompatible API changes or
+ *  - @ref VERSION_MAJOR (MAJOR): incremented for incompatible API changes or
  *    fundamental architectural changes that break backwards compatibility
  *    with previously stored configurations or on-air behaviour.
  *  - @ref VERSION_MINOR (MINOR): incremented when new functionality is added
@@ -52,10 +52,8 @@
  *
  * When the major version is incremented, the minor and patch counters must
  * be reset to zero.
- *
- * Current value: @c 1.
  */
-#define VERSION_MAYOR 1
+#define VERSION_MAJOR 1
 
 /**
  * @brief Minor version number.
@@ -66,8 +64,6 @@
  * bug that changes on-air behaviour.
  *
  * When the minor version is incremented, the patch counter must be reset to zero.
- *
- * Current value: @c 0.
  */
 #define VERSION_MINOR 0
 
@@ -77,8 +73,6 @@
  * Incremented for minor backwards-compatible bug fixes, code quality improvements,
  * documentation updates, or cosmetic changes that do not affect on-air behaviour
  * or user-visible functionality.
- *
- * Current value: @c 0.
  */
 #define VERSION_PATCH 0
 
@@ -86,7 +80,7 @@
  * @brief Stringify helper — converts a macro token to a string literal.
  *
  * This two-level macro expansion is required so that numeric macros such as
- * @ref VERSION_MAYOR are expanded to their values before stringification.
+ * @ref VERSION_MAJOR are expanded to their values before stringification.
  * Using @c #x directly on an argument that is itself a macro would produce
  * the macro name rather than its value.
  *
@@ -122,7 +116,7 @@
  *   static const char banner[] = "ESP32-WSPR/" FW_VERSION_STRING;
  * @endcode
  */
-#define FW_VERSION_STRING STR(VERSION_MAYOR) "." STR(VERSION_MINOR) "." STR(VERSION_PATCH)
+#define FW_VERSION_STRING STR(VERSION_MAJOR) "." STR(VERSION_MINOR) "." STR(VERSION_PATCH)
 
 /** @} */
 

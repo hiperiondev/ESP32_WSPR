@@ -210,15 +210,12 @@ esp_err_t config_load(wspr_config_t *cfg) {
     if (cfg->iaru_region < 1 || cfg->iaru_region > 3)
         cfg->iaru_region = (uint8_t)IARU_REGION_1;
 
-    // Enforce minimum hop interval: one full WSPR TX slot = 110.6 s, rounded to 120 s
-    if (cfg->hop_interval_sec < 120u)
-        cfg->hop_interval_sec = 120u;
-
-    // Snap hop_interval_sec to the nearest multiple of 120 s
-    // at load time so the hopping timer always aligns with even-minute UTC boundaries.
-    // A hop interval of e.g. 300 s (not a multiple of 120) would cause hops at
-    // arbitrary offsets within the 2-minute cycle, wasting partial TX slots.
-    cfg->hop_interval_sec = ((cfg->hop_interval_sec + 60u) / 120u) * 120u;
+    // Enforce only the hard minimum (one full WSPR TX slot = 110.6 s,
+    // rounded up to 120 s). The snap-to-nearest-multiple-of-120 has been moved
+    // to save time in h_post_config() / h_live_update() (web_server.c) so the
+    // value stored on flash always matches what the user sees in the web UI.
+    // Silently mutating the value at load time caused a confusing discrepancy:
+    // e.g. 180 s saved -> loaded as 240 s, but UI showed 180 s after reboot.
     if (cfg->hop_interval_sec < 120u)
         cfg->hop_interval_sec = 120u;
 

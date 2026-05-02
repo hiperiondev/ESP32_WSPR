@@ -740,11 +740,14 @@ static void scheduler_task(void *arg) {
         if (hop_intv == 0u)
             hop_intv = 120u;
 
-        // Snap hop_intv to the nearest multiple of 120 s
-        // so frequency hops always align with even-minute TX boundaries.
-        // A non-multiple hop interval (e.g. 600 s) would otherwise cause hops
-        // at odd offsets within the 2-minute cycle, wasting partial TX slots.
-        hop_intv = ((hop_intv + 60u) / 120u) * 120u;
+        // The snap-to-nearest-120s has been removed from this
+        // location. hop_interval_sec is now snapped at SAVE time in
+        // h_post_config() and h_live_update() (web_server.c), so the value
+        // read from _cfg is already a valid multiple of 120 s. Snapping here
+        // as well was redundant and would have masked any future regression in
+        // the save path by silently correcting a bad stored value.
+        // The hard minimum guard (120 s) is retained as a safety net in case
+        // a direct NVS write bypasses the web server validation path.
         if (hop_intv < 120u)
             hop_intv = 120u;
 

@@ -1060,7 +1060,21 @@ static esp_err_t h_post_config(httpd_req_t *req) {
             interval = 120u;
         if (interval > 86400u)
             interval = 86400u;
-        _cfg->hop_interval_sec = interval;
+        // Snap to the nearest multiple of 120 s at SAVE time so the
+        // stored value always matches what the scheduler uses and what the UI shows.
+        // Previously this snap was done silently at load time, causing the UI to
+        // show the raw value (e.g. 180 s) while the transmitter actually hopped at
+        // the snapped value (e.g. 240 s) — an invisible discrepancy the user
+        // could not detect without inspecting the serial log.
+        // Doing it here means the 200 OK response carries the snapped value, which
+        // loadCfg() will read back and display, so the user sees the rounded number.
+        uint32_t snapped = ((interval + 60u) / 120u) * 120u;
+        if (snapped < 120u)
+            snapped = 120u;
+        if (snapped != interval) {
+            ESP_LOGW(TAG, "hop_interval_sec %lu snapped to %lu (nearest 120 s multiple)", (unsigned long)interval, (unsigned long)snapped);
+        }
+        _cfg->hop_interval_sec = snapped;
     }
     if ((v = cJSON_GetObjectItem(j, "tx_duty_pct")) && cJSON_IsNumber(v)) {
         int pct = v->valueint;
@@ -1270,6 +1284,37 @@ static esp_err_t h_wifi_scan(httpd_req_t *req) {
     if (!check_auth(req))
         return send_auth_challenge(req);
 #endif
+    // Reject Wi-Fi scan requests while a WSPR transmission is active.
+    // wifi_manager_scan() triggers a ~1-2 s blocking passive scan. When the
+    // current Wi-Fi mode is WIFI_MODE_AP the scan must temporarily elevate the
+    // mode to WIFI_MODE_APSTA, which causes a driver-level channel switch with a
+    // 300 ms blackout of all Wi-Fi traffic. This channel switch raises interrupt
+    // latency on both ESP32 cores and can stall the I2C write inside
+    // oscillator_set_freq_mhz() by several milliseconds, introducing visible DT
+    // jitter at receiving stations. Returning 503 during TX protects the
+    // symbol timing loop without affecting normal (idle) scan operation.
+    // We check both tx_active (WSPR symbol loop running) and tone_active (tone
+    // test in progress), since both use the oscillator timing path.
+    bool tx_busy = false;
+    if (_cfg) {
+        web_server_cfg_lock();
+        tx_busy = _cfg->tone_active;
+        web_server_cfg_unlock();
+    }
+    // Read tx_active from the status snapshot (written by scheduler_task).
+    if (!tx_busy) {
+        if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            tx_busy = _status.tx_active;
+            xSemaphoreGive(_status_mutex);
+        }
+    }
+    if (tx_busy) {
+        ESP_LOGW(TAG, "Wi-Fi scan rejected: WSPR TX or tone test in progress");
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"Wi-Fi scan not available during TX\"}", -1);
+        return ESP_OK;
+    }
     char *json = wifi_manager_scan();
     if (!json) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan alloc failed");
@@ -1360,9 +1405,20 @@ static esp_err_t h_live_update(httpd_req_t *req) {
             interval = 120u;
         if (interval > 86400u)
             interval = 86400u;
-        if (interval != _cfg->hop_interval_sec) {
-            _cfg->hop_interval_sec = interval;
-            ESP_LOGI(TAG, "LIVE UPDATE: hop_interval_sec=%lu", (unsigned long)interval);
+        // Apply the same save-time snap as h_post_config so live
+        // updates also store a valid multiple-of-120 value. Without this the
+        // live update path would bypass the snap and write an un-snapped value
+        // back to _cfg, which config_save() would then persist as-is.
+        uint32_t snapped = ((interval + 60u) / 120u) * 120u;
+        if (snapped < 120u)
+            snapped = 120u;
+        if (snapped != _cfg->hop_interval_sec) {
+            if (snapped != interval) {
+                ESP_LOGW(TAG, "LIVE UPDATE: hop_interval_sec %lu snapped to %lu (nearest 120 s multiple)", (unsigned long)interval, (unsigned long)snapped);
+            } else {
+                ESP_LOGI(TAG, "LIVE UPDATE: hop_interval_sec=%lu", (unsigned long)snapped);
+            }
+            _cfg->hop_interval_sec = snapped;
         }
     }
     cJSON *bands = cJSON_GetObjectItem(j, "band_enabled");
