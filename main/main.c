@@ -467,6 +467,14 @@ static void wspr_transmit(void) {
             esp_err_t osc_err = oscillator_set_freq_mhz(base_hz, tone_offsets[i + 1]);
             if (osc_err != ESP_OK) {
                 ESP_LOGE(TAG, "oscillator_set_freq_mhz failed at symbol %d->%d: %s -- aborting TX", i, i + 1, esp_err_to_name(osc_err));
+                // Invalidate the Si5351 band cache after a mid-TX
+                // I2C failure. Without this call, the next wspr_transmit() invocation
+                // would find _si_cache.valid==true and _si_last_set_hz==base_hz, take
+                // the fast path (si_apply_tone only), and transmit 162 symbols at
+                // whatever corrupt PLL state the failed write left behind -- producing
+                // a silent wrong-frequency frame. oscillator_invalidate_cache() forces
+                // a full si_cache_band() + PLL reset on the next oscillator_set_freq().
+                oscillator_invalidate_cache();
                 break;
             }
         }
@@ -565,7 +573,7 @@ static void scheduler_task(void *arg) {
     // The window is intentionally one-sided (0..500 ms late) because we cannot
     // start early - we wait for the second rollover before calling wspr_transmit().
 #define WSPR_TX_START_WINDOW_US 500000LL // 500 ms late is acceptable
-    // [MODIFIED - FIX 2] Count consecutive skipped slots to detect persistent
+    // Count consecutive skipped slots to detect persistent
     // sync problems and force a time-sync log warning after 3 missed slots.
 #define WSPR_MAX_CONSECUTIVE_SKIPS 3
     int s_consecutive_skips = 0;
@@ -724,37 +732,47 @@ static void scheduler_task(void *arg) {
             }
         }
 
-        // Prime the duty accumulator on the very first slot so that
-        // the first TX fires immediately.
+        // Prime the duty accumulator on the very first
+        // slot so the first TX fires immediately when 0 < duty < 100.
+        // Priming sets accum = 100 - duty so that on slot 1:
+        //   (accum + duty) % 100 == 0  =>  0 < duty  =>  do_tx = true.
+        // The else branch (was "else if (duty >= 100u)") simplified to plain
+        // else: duty == 0 never reaches this block (guard below exits first),
+        // and duty >= 100 needs accum = 0 which is already the reset value.
         if (!s_duty_primed) {
             if (duty > 0u && duty < 100u) {
                 s_duty_accum = (uint16_t)(100u - duty);
-            } else if (duty >= 100u) {
+            } else {
                 s_duty_accum = 0u;
             }
             s_duty_primed = true;
         }
 
         bool do_tx = false;
-        if (duty > 0u) {
-            if (duty >= 100u) {
-                do_tx = true;
-            } else {
-                s_duty_accum += (uint16_t)duty;
-                if (s_duty_accum >= 100u) {
-                    s_duty_accum -= 100u;
-                    do_tx = true;
-                }
-            }
+        // Use modulo Bresenham accumulator instead of
+        // conditional subtraction. s_duty_accum is always in [0, 99] after this
+        // block, so uint16_t overflow is impossible regardless of duty value or
+        // any previous accumulator state.
+        // Mathematical equivalence with the original (for valid inputs):
+        //   accum = (accum + duty) % 100; TX if accum < duty
+        // Both produce exactly 1 TX per floor(100/duty) slots with the same phase.
+        if (duty == 0u) {
+            // Never transmit; accumulator unchanged.
+            do_tx = false;
+        } else if (duty >= 100u) {
+            // Always transmit every slot; no accumulator needed.
+            do_tx = true;
+        } else {
+            // modulo update keeps accum in [0, 99].
+            s_duty_accum = (uint16_t)((s_duty_accum + duty) % 100u);
+            // TX fires when the accumulator wrapped (new value < duty).
+            do_tx = (s_duty_accum < duty);
         }
 
         if (!do_tx) {
             ESP_LOGI(TAG, "Duty cycle skip (pct=%u accum=%u)", (unsigned)duty, (unsigned)s_duty_accum);
             g_pre_armed = false;
             g_pre_arm_base_hz = 0;
-
-            if (s_duty_accum > 200u)
-                s_duty_accum = 200u;
 
 #if CONFIG_WSPR_TASK_WDT_ENABLE
             esp_task_wdt_reset();

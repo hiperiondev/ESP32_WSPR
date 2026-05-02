@@ -140,49 +140,40 @@ static esp_err_t si5351_ping(void) {
     return i2c_master_transmit_receive(si_dev_handle, &reg, 1, &dummy, 1, pdMS_TO_TICKS(200));
 }
 
-/**
- * @brief Compute and program the PLLA integer-only feedback Multisynth (MSNA).
- *
- * The Si5351 VCO must operate in the range 600-900 MHz (per datasheet).
- * This function selects the smallest integer multiplier 'a' that keeps
- * VCO = a * xtal inside that window, then programs the MSNA registers
- * with b=0, c=1 (pure integer mode) for minimum jitter.
- *
- * AN619 Equation for MSNA integer mode:
- *   P1 = 128 * a - 512
- *   P2 = 0  (b = 0)
- *   P3 = 1  (c = 1)
- * Written to registers 26-33 (MSNA base).
- *
- * @return ESP_OK on success; ESP_ERR_INVALID_ARG if xtal is out of range.
- */
 static esp_err_t si_init_pll(void) {
     // Verify crystal is within the Si5351 supported input range
     if (_si_xtal < 10000000UL || _si_xtal > 40000000UL) {
-        ESP_LOGE(TAG, "SI5351: xtal %lu Hz out of supported range 10-40 MHz", (unsigned long)_si_xtal);
+        ESP_LOGE(TAG, "SI5351: xtal %lu Hz out of range (10-40 MHz required)", (unsigned long)_si_xtal);
         return ESP_ERR_INVALID_ARG;
     }
+    // Compute _si_vco as an approximate VCO seed for si_cache_band().
+    // si_cache_band() uses _si_vco only to derive the initial output-divider
+    // estimate; it recomputes vco_target = eff_hz * d_int from the actual
+    // target frequency, so minor rounding here does not affect output accuracy.
+    // VCO computation kept; integer MSNA write removed.
     uint32_t xtal_mhz = _si_xtal / 1000000UL;
-    // Choose multiplier 'a' to target ~875 MHz VCO (mid-range for headroom)
     uint32_t a = 875UL / xtal_mhz;
     if (a < 15UL)
         a = 15UL; // MSNA minimum integer multiplier per AN619
     if (a > 90UL)
         a = 90UL; // MSNA maximum integer multiplier per AN619
-    // Use exact crystal frequency instead of MHz-truncated value.
     _si_vco = a * _si_xtal;
-    // P1 for integer-only PLL: P1 = 128*a - 512, P2=0, P3=1 (b=0, c=1)
-    uint32_t p1 = 128UL * a - 512UL;
-    uint8_t pll_regs[8] = {
-        0x00, 0x01, (uint8_t)((p1 >> 16) & 0x03), (uint8_t)((p1 >> 8) & 0xFF), (uint8_t)(p1 & 0xFF), 0x00, 0x00, 0x00,
-    };
-    esp_err_t err = si_write_bulk(SI5351_PLLA_MSNA, pll_regs, 8);
+    // Power down CLK1 and CLK2 at the clock-control
+    // register level (registers 17 and 18, value 0x80 = powerdown bit).
+    // si5351_try_init() already disabled all outputs via register 3 (OUTPUT_EN),
+    // but powering down CLK1/CLK2 here also disables their driver stages so
+    // they draw no current and produce no output even if register 3 is later
+    // modified. CLK0 is left to si5351_try_init() which sets SI5351_CLK0_CTRL_VAL.
+    esp_err_t err = si_write(16 + 1, 0x80); // CLK1: powerdown
     if (err != ESP_OK)
         return err;
-    // Reset PLLA to lock to the new multiplier (bit 5 of register 177)
-    err = si_write(SI5351_PLL_RESET, 0x20);
-    ESP_LOGI(TAG, "SI5351 PLL locked: xtal=%lu Hz a=%lu vco=%lu Hz", (unsigned long)_si_xtal, (unsigned long)a, (unsigned long)_si_vco);
-    return err;
+    err = si_write(16 + 2, 0x80); // CLK2: powerdown
+    if (err != ESP_OK)
+        return err;
+    // si_cache_band() programs MSNA in fractional mode and resets PLLA once on
+    // the first oscillator_set_freq() call -- no double reset at startup.
+    ESP_LOGI(TAG, "SI5351 basic init OK (xtal=%lu Hz vco_seed=%lu Hz CLK1/CLK2 powered down)", (unsigned long)_si_xtal, (unsigned long)_si_vco);
+    return ESP_OK;
 }
 
 // Band parameter cache for the Si5351 tone-generation scheme.
@@ -203,7 +194,13 @@ typedef struct {
     uint32_t xtal_kHz;    // xtal_Hz / 1000, e.g. 25000
     uint32_t full_den;    // xtal_kHz * 1000 = xtal_Hz, e.g. 25000000
     uint8_t r_div_reg;    // R-divider exponent written to MS0 (0..7)
-    bool valid;           // true after si_cache_band() succeeds
+    // Pre-computed upper nibble of Si5351 register 31.
+    // Reg 31 = P3[19:16] in bits[7:4] | P2[19:16] in bits[3:0].
+    // Stored once at si_cache_band() time from pll_c so si_write_pll_p1p2_only()
+    // no longer derives it from pll_c at every symbol -- making the invariant
+    // explicit in the cache rather than implicitly depending on pll_c==0xFFFFF.
+    uint8_t reg31_p3_nibble; // (pll_c >> 12) & 0xF0 -- P3[19:16] bits for reg31
+    bool valid;              // true after si_cache_band() succeeds
 } si5351_band_cache_t;
 
 static si5351_band_cache_t _si_cache = { 0 };
@@ -256,14 +253,21 @@ static esp_err_t si_write_pll_regs(uint32_t pll_a, uint32_t pll_b, uint32_t pll_
  * @param pll_c Fractional denominator (unchanged; used only for the calculation).
  * @return ESP_OK on success.
  */
-static esp_err_t si_write_pll_p1p2_only(uint32_t pll_a, uint32_t pll_b, uint32_t pll_c) {
+static esp_err_t si_write_pll_p1p2_only(uint32_t pll_a, uint32_t pll_b) {
+    uint32_t pll_c = _si_cache.pll_c; // use cached denominator for P1/P2 math
     uint32_t floor_128b_c = (128u * pll_b) / pll_c;
     uint32_t p1 = 128u * pll_a + floor_128b_c - 512u;
     uint32_t p2 = 128u * pll_b - pll_c * floor_128b_c;
 
+    // use _si_cache.reg31_p3_nibble for bits[7:4] of register 31
+    // instead of recomputing from pll_c. See si5351_band_cache_t.reg31_p3_nibble.
     uint8_t regs[6] = {
-        (uint8_t)((p1 >> 16) & 0x03u), (uint8_t)((p1 >> 8) & 0xFFu), (uint8_t)(p1 & 0xFFu), (uint8_t)(((pll_c >> 12) & 0xF0u) | ((p2 >> 16) & 0x0Fu)),
-        (uint8_t)((p2 >> 8) & 0xFFu),  (uint8_t)(p2 & 0xFFu),
+        (uint8_t)((p1 >> 16) & 0x03u),
+        (uint8_t)((p1 >> 8) & 0xFFu),
+        (uint8_t)(p1 & 0xFFu),
+        (uint8_t)(_si_cache.reg31_p3_nibble | ((p2 >> 16) & 0x0Fu)), // P3[19:16] from cache | P2[19:16]
+        (uint8_t)((p2 >> 8) & 0xFFu),
+        (uint8_t)(p2 & 0xFFu),
     };
 
     // Start write at MSNA+2 (register 28) to skip the P3 bytes
@@ -431,16 +435,13 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     // The PLL VCO target is eff_hz * d_int; the fractional part comes from the
     // remainder when dividing VCO_target by xtal_Hz.
     uint32_t pll_c = 1048575UL;
-    // Compile-time assertion that pll_c == 0xFFFFF.
-    // si_write_pll_p1p2_only() writes Si5351 register 31 as:
-    //   ((pll_c >> 12) & 0xF0) | ((p2 >> 16) & 0x0F)
-    // The upper nibble is P3[19:16]. For it to be always 0xF (constant across
-    // all tones), pll_c must equal 0xFFFFF so that (pll_c >> 12) == 0xFF and
-    // (0xFF & 0xF0) == 0xF0. If pll_c ever changes, the partial-write
-    // optimisation silently writes a wrong P3 upper nibble, causing tone
-    // frequency errors for the entire WSPR transmission. This assert enforces
-    // the invariant at compile time so a future change to pll_c cannot go unnoticed.
-    static_assert((1048575UL >> 12u) == 255u, "pll_c P3-nibble invariant: si_write_pll_p1p2_only requires pll_c=0xFFFFF so P3[19:16]==0xF always");
+
+    // Runtime guard: log an error if pll_c exceeds the 20-bit Si5351 field width.
+    // A pll_c > 0xFFFFF would corrupt the P3 register layout.
+    if (pll_c > 0xFFFFFUL) {
+        ESP_LOGE(TAG, "SI5351: pll_c=%lu exceeds 20-bit P3 field -- logic error", (unsigned long)pll_c);
+        return ESP_ERR_INVALID_ARG;
+    }
     // Compute vco_target in pure 32-bit.
     // PROOF it fits: eff_hz * d_int ≈ vco_cal ≈ 870 MHz.
     // Upper bound: eff_hz*d_int <= vco_cal + eff_hz <= 870,087,000 + 28,127,600 = 898,214,600
@@ -530,6 +531,13 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     _si_cache.xtal_kHz = xtal_kHz;
     _si_cache.full_den = full_den;
     _si_cache.r_div_reg = r_div_reg;
+    // Pre-compute and cache the P3[19:16] nibble for register 31.
+    // This is the upper nibble of Si5351 register 31 = P3[19:16] in bits[7:4].
+    // By caching it here from pll_c, si_write_pll_p1p2_only() can use the stored
+    // value instead of recomputing from pll_c on each of the 162 per-symbol writes.
+    // If pll_c ever changes to a non-standard value in a future revision, the nibble
+    // stored here will be correct for THAT value.
+    _si_cache.reg31_p3_nibble = (uint8_t)((pll_c >> 12u) & 0xF0u);
     _si_cache.valid = true;
 
     ESP_LOGI(TAG, "SI5351 band cache: d=%lu pll_a=%lu pll_b_base=%lu pll_c=%lu r_div=%u b_step_int=%lu b_step2_int=%lu b_step2_rem=%lu", (unsigned long)d_int,
@@ -625,8 +633,8 @@ static esp_err_t si_apply_tone(uint32_t tone_millihz) {
         pll_b = _si_cache.pll_c - 1u;
     }
 
-    // Write only the P1+P2 fields; skip P3 (denominator doesn't change)
-    return si_write_pll_p1p2_only(_si_cache.pll_a, pll_b, _si_cache.pll_c);
+    // Write only the P1+P2 fields; skip P3 (denominator doesn't change).
+    return si_write_pll_p1p2_only(_si_cache.pll_a, pll_b);
 }
 
 /**
@@ -904,16 +912,23 @@ esp_err_t oscillator_init(void) {
 
 esp_err_t oscillator_set_freq(uint32_t freq_hz) {
     if (_osc_type == OSC_SI5351) {
-        // Avoid redundant si_cache_band() calls if the frequency hasn't changed
-        if (freq_hz == _si_last_set_hz && _si_cache.valid) {
-            return si_apply_tone(0u); // reapply base tone (offset = 0)
-        }
-
-        // Recompute dividers and PLL parameters for the new band/frequency
-        esp_err_t err = si_cache_band(freq_hz);
-        if (err == ESP_OK)
+        // Explicitly check _si_cache.valid FIRST.
+        // After an I2C error mid-symbol the caller must call oscillator_invalidate_cache() so that _si_cache.valid
+        // is false here, forcing si_cache_band() to do a full PLL re-lock.
+        // Without that call the fast path (si_apply_tone only) would be taken even
+        // though the PLL state is corrupt, resulting in a silent wrong-frequency frame.
+        if (!_si_cache.valid || freq_hz != _si_last_set_hz) {
+            // Force _si_last_set_hz to 0 before the call so that if si_cache_band()
+            // fails partway through, a subsequent retry with the same freq_hz will
+            // not incorrectly skip the re-cache (stale _si_last_set_hz == freq_hz).
+            _si_last_set_hz = 0u;
+            esp_err_t err = si_cache_band(freq_hz);
+            if (err != ESP_OK)
+                return err;
             _si_last_set_hz = freq_hz;
-        return err;
+        }
+        // Apply tone offset = 0 (base carrier) at the start of each TX window.
+        return si_apply_tone(0u);
     }
     if (_osc_type == OSC_AD9850) {
         // For the AD9850, compute and write the FTW directly
@@ -1107,6 +1122,34 @@ const char *oscillator_hw_name(void) {
             return "None (DUMMY)";
     }
 }
+// Public function oscillator_invalidate_cache().
+// Unconditionally marks the Si5351 band cache as invalid and clears
+// _si_last_set_hz so that the next oscillator_set_freq() call is forced to run
+// a complete si_cache_band() + PLL reset sequence, regardless of whether the
+// carrier frequency has changed.
+//
+// Call this from the symbol-loop error handler in main.c whenever
+// oscillator_set_freq_mhz() returns an error mid-transmission:
+//   if (osc_err != ESP_OK) {
+//       oscillator_invalidate_cache();
+//       break;
+//   }
+// Without this call, the next TX would take the fast path (si_apply_tone only)
+// even though the Si5351 PLL state may be corrupt from the failed I2C write,
+// producing a silent wrong-frequency frame.
+//
+// For AD9850 and DUMMY modes this function is a no-op because those drivers
+// have no deferred cache state.
+void oscillator_invalidate_cache(void) {
+    if (_osc_type == OSC_SI5351) {
+        _si_cache.valid = false;
+        _si_last_set_hz = 0u;
+        ESP_LOGW(TAG, "SI5351 band cache invalidated (recovery path)");
+    }
+    // AD9850: FTW is written inline; no cache to invalidate
+    // DUMMY: no-op
+}
+
 // Oscillator_cache_valid — new public function.
 // Returns true when the oscillator hardware is correctly programmed for the
 // last frequency set by oscillator_set_freq(). Returns false after

@@ -339,5 +339,14 @@ const char *oscillator_hw_name(void);
 // calibration change even when the tone frequency itself has not changed.
 bool oscillator_cache_valid(void);
 
+// Oscillator_invalidate_cache()
+// Forces the Si5351 band cache to be rebuilt on the next oscillator_set_freq()
+// call, regardless of whether the carrier frequency has changed.
+// Must be called from the symbol-loop error handler in main.c after any
+// oscillator_set_freq_mhz() failure so that the subsequent TX attempt triggers
+// a full PLL re-lock rather than the fast-path si_apply_tone()-only update.
+// No-op for AD9850 and DUMMY modes.
+void oscillator_invalidate_cache(void);
+
 /** @} */
 /** @} */

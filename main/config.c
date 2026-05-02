@@ -38,11 +38,6 @@ static bool _was_reset = false;
 //   Region 2 (Americas):          5 346 500 Hz dial -> RF center 5 348 000 Hz
 //   Region 3 (Asia/Pacific):      5 367 000 Hz dial -> RF center 5 368 500 Hz
 //
-// MODIFIED: Region 2 and Region 3 60 m entries corrected.
-// Previous code had 5 288 700 Hz (Region 1 value) for all three regions,
-// which caused Region 2 and 3 transmitters to send 60 m WSPR 59.3 kHz and
-// 79.8 kHz below the correct regional dial frequency, rendering all 60 m
-// transmissions undecodable by regional receivers for those two regions.
 const uint32_t BAND_FREQ_HZ[3][BAND_COUNT] = {
     // -- Region 1: Europe, Africa, Middle East --
     {
