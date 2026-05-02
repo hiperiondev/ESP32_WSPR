@@ -174,26 +174,13 @@ static void select_next_band(bool force_next, bool force_rebuild) {
              (unsigned long)config_band_freq_hz((iaru_region_t)g_cfg.iaru_region, (wspr_band_t)g_band_idx));
 }
 
-// Per the WSPR 2.0 specification (K1JT), Type-3 companion messages are defined
-// ONLY as companions to Type-2 messages (compound callsigns containing '/').
-// There is NO standard defined for a simple-callsign Type-1 + Type-3
-// alternation. WSJT-X itself never transmits this combination.
-//
-// When a receiver decodes a Type-3 message that was NOT preceded by a Type-2
-// from the same station, the 28-bit field (containing pack_loc6_type3 output)
-// is interpreted as a Type-1 callsign, yielding a phantom callsign (e.g.
-// "4G8ILP") and the 15-bit hash of the real callsign appears as a phantom
-// locator (e.g. "LL59"). These phantom spots are uploaded to WSPRnet,
-// polluting the propagation database with non-existent stations.
-// The WSPR_MSG_TYPE_3 case (simple callsign + 6-char locator) is separated
-// from the WSPR_MSG_TYPE_2 case (compound callsign). For TYPE_3, both parity
-// slots now encode a standard Type-1 message using only the first 4 characters
-// of the locator. No Type-3 companion is ever transmitted. Parity is not
-// toggled (no alternation needed). This matches WSJT-X WSPR beacon behavior
-// and produces clean, unambiguous spots on WSPRnet.
-//
-// The TYPE_2 path (compound callsign, parity alternation between Type-2
-// primary and Type-3 companion) is completely unchanged.
+// wspr_transmit() now implements proper Type-1 + Type-3 alternation
+// for simple callsigns with 6-char locators (WSPR_MSG_TYPE_3 path).
+// Mirrors the Type-2 compound-callsign alternation:
+//   parity==0 -> Type-1  (first 4 locator chars; establishes callsign in decoders)
+//   parity==1 -> Type-3  (full 6-char locator + 15-bit callsign hash)
+// Receivers link the Type-3 to the previously decoded Type-1 via the hash.
+// The TYPE_2 path (compound callsign) is completely unchanged.
 static void wspr_transmit(void) {
     uint8_t symbols[WSPR_SYMBOLS];
     int enc_result;
@@ -219,31 +206,42 @@ static void wspr_transmit(void) {
     wspr_msg_type_t msg_type = wspr_encode_type(snap_callsign, snap_locator);
 
     if (msg_type == WSPR_MSG_TYPE_1) {
-        // Standard Type-1: simple callsign + 4-char locator. No alternation.
+        // Standard Type-1: simple callsign + 4-char locator. No alternation needed.
         enc_result = wspr_encode(snap_callsign, snap_locator, snap_power, symbols);
-
-        // WSPR_MSG_TYPE_3 (simple callsign + 6-char locator)
-        // is handled separately from WSPR_MSG_TYPE_2 (compound callsign).
-        // A Type-3 companion MUST NOT be sent for simple callsigns: doing so
-        // generates phantom spots (e.g. "4G8ILP LL59") on WSPRnet because receiving
-        // stations decode the Type-3 28-bit locator field as a Type-1 callsign.
-        // Per the WSPR 2.0 spec and WSJT-X beacon practice, simple callsigns always
-        // use Type-1 only, truncating the locator to the first 4 characters.
-        // Parity is not toggled and no companion slot is needed.
     } else if (msg_type == WSPR_MSG_TYPE_3) {
-        // Simple callsign + 6-char locator: transmit Type-1 only.
-        // Truncate the locator to 4 characters for Type-1 encoding.
-        // The sub-square precision (chars 5-6) is intentionally NOT transmitted
-        // because the Type-3 companion would create phantom spots.
-        char loc4[5];
-        loc4[0] = snap_locator[0];
-        loc4[1] = snap_locator[1];
-        loc4[2] = snap_locator[2];
-        loc4[3] = snap_locator[3];
-        loc4[4] = '\0';
-        enc_result = wspr_encode(snap_callsign, loc4, snap_power, symbols);
-        // No parity toggle: no alternation, no companion message.
-        ESP_LOGD(TAG, "TYPE_3 path: sending Type-1 only (loc truncated to 4 chars '%s')", loc4);
+        // simple callsign + 6-char locator now properly alternates:
+        //   parity==0 -> Type-1 (first 4 locator chars)
+        //   parity==1 -> Type-3 companion (full 6-char locator + callsign hash)
+        // Receivers link the Type-3 companion to the Type-1 via the 15-bit
+        // callsign hash stored in the Type-3 locator field.
+        if (snap_parity == 0) {
+            // parity==0: Type-1 with first 4 chars of the stored locator.
+            // wspr_encode() also accepts the full 6-char string and truncates
+            // internally, but passing an explicit 4-char buffer is clearer.
+            char loc4[5];
+            loc4[0] = snap_locator[0];
+            loc4[1] = snap_locator[1];
+            loc4[2] = snap_locator[2];
+            loc4[3] = snap_locator[3];
+            loc4[4] = '\0';
+            enc_result = wspr_encode(snap_callsign, loc4, snap_power, symbols);
+            ESP_LOGD(TAG, "TYPE_3 path parity=0: Type-1 (loc4='%.4s')", snap_locator);
+        } else {
+            // parity==1: Type-3 companion with the full 6-char sub-square locator.
+            // wspr_encode_type() only returns WSPR_MSG_TYPE_3 when strlen(locator)>=6,
+            // so snap_locator is guaranteed to have at least 6 usable characters.
+            char loc6[7];
+            memcpy(loc6, snap_locator, 6);
+            loc6[6] = '\0';
+            enc_result = wspr_encode_type3(snap_callsign, loc6, snap_power, symbols);
+            ESP_LOGD(TAG, "TYPE_3 path parity=1: Type-3 companion (loc6='%.6s')", snap_locator);
+        }
+        // Toggle parity after successful encode so the next slot uses the other type.
+        if (enc_result >= 0) {
+            web_server_cfg_lock();
+            g_cfg.tx_slot_parity ^= 1u;
+            web_server_cfg_unlock();
+        }
 
     } else {
         // WSPR_MSG_TYPE_2: compound callsign (contains '/').

@@ -18,14 +18,12 @@
 // Station card
 #define WEBUI_CARD_STATION_TITLE "Estaci&#243;n"
 #define WEBUI_LABEL_CALLSIGN     "Indicativo"
-// Aclarar que el localizador de 6 caracteres se almacena pero solo
-// se transmiten 4 (el mensaje Tipo-3 complementario se suprime para evitar
-// manchas fantasma en WSPRnet).
-#define WEBUI_LABEL_LOCATOR "Localizador Maidenhead (4 car. recomendado; 6 car. se almacena pero solo se transmiten 4)"
+// el localizador de 6 caracteres se almacena y se transmite mediante
+// slots alternos Tipo-1 (4 car.) + Tipo-3 (6 car.) para precision de sub-cuadricula.
+#define WEBUI_LABEL_LOCATOR "Localizador Maidenhead (4 car. = solo Tipo-1; 6 car. = alternando Tipo-1 + Tipo-3)"
 // Etiqueta de la fila de aviso de truncamiento del localizador en el panel de estado
 #define WEBUI_STATUS_LOC_NOTE_LABEL "Precisi&#243;n del localizador"
-// Texto del badge JS mostrado en loc_note_row cuando loc_truncated es verdadero
-#define WEBUI_JS_LOC_TRUNCATED_NOTE "6 car. almacenados, 4 car. TX (Tipo-3 suprimido)"
+#define WEBUI_JS_LOC_TRUNCATED_NOTE "6 car. almacenados, TX alternando Tipo-1 (4 car.) + Tipo-3 (6 car.)"
 #define WEBUI_LABEL_POWER           "Potencia TX (dBm)"
 #define WEBUI_LABEL_XTAL_CAL        "Calibraci&#243;n XTAL (ppb)"
 #define WEBUI_HINT_XTAL_CAL         "Compensaci&#243;n del cristal en ppb. 0&#61;sin correcci&#243;n."

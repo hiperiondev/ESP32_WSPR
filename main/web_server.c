@@ -318,10 +318,10 @@ static const char INDEX_HTML[] =
     "<div class='status-row'><span>" WEBUI_STATUS_NEXT_LABEL "</span><span id='s_next'>---</span></div>"
     "<div class='status-row'><span>" WEBUI_STATUS_TX_LABEL "</span><span id='s_tx'><span class='badge err'>OFF</span></span></div>"
     "<div class='status-row'><span>" WEBUI_STATUS_SYM_LABEL "</span><span id='s_sym'>---</span></div>"
-    // Locator truncation notice row — hidden by default, shown
+    // Locator precision notice row — hidden by default, shown
     // by pollStatus() JS when the server reports loc_truncated=true
-    // (simple callsign + 6-char locator: Type-3 companion suppressed to avoid
-    // phantom WSPRnet spots, so only the first 4 chars of the locator are sent).
+    // simple callsign + 6-char locator now alternates Type-1 + Type-3;
+    // the row informs the user that sub-square precision IS being transmitted.
     "<div class='status-row' id='loc_note_row' style='display:none'>"
     "<span>" WEBUI_STATUS_LOC_NOTE_LABEL "</span>"
     "<span id='s_loc_note' class='badge warn'></span>"
@@ -650,9 +650,9 @@ static const char INDEX_HTML[] =
     "document.getElementById('s_tx').innerHTML=s.tx_active?"
     "`<span class='badge ok'>ON</span>`:`<span class='badge err'>OFF</span>`;"
     "document.getElementById('s_sym').textContent=s.tx_active?(s.symbol_idx+'/162'):'---';"
-    // Show a visible warning when a 6-char locator + simple callsign
-    // is configured: Type-3 companion is suppressed, so only the first 4 chars are
-    // transmitted. The user may not realise the sub-square precision is not on-air.
+    // Show an informational notice when a 6-char locator + simple callsign
+    // is configured: wspr_transmit() now alternates Type-1 (4-char loc) and
+    // Type-3 companion (6-char loc) so sub-square precision IS being transmitted.
     "if(s.loc_truncated){"
     "document.getElementById('loc_note_row').style.display='';"
     "document.getElementById('s_loc_note').textContent='" WEBUI_JS_LOC_TRUNCATED_NOTE "';"
@@ -1218,15 +1218,16 @@ static esp_err_t h_status(httpd_req_t *req) {
     bool tone_active_snap = _cfg ? _cfg->tone_active : false;
     float tone_freq_snap = _cfg ? _cfg->tone_freq_khz : 0.0f;
     // Detect simple-callsign + 6-char-locator combination.
-    // In this case wspr_transmit() silently truncates the locator to 4 chars
-    // (Type-3 companion suppressed to avoid phantom spots on WSPRnet).
-    // Expose this as a boolean flag so the web UI can warn the user that the
-    // configured 6-char sub-square precision is NOT being transmitted.
+    // When this combination is configured, wspr_transmit() alternates between
+    // Type-1 (parity==0, first 4 locator chars) and Type-3 companion
+    // (parity==1, full 6-char locator + callsign hash).
+    // Expose this as a boolean flag so the web UI can inform the user that
+    // the full sub-square precision is being conveyed via Type-1 + Type-3 alternation.
     bool loc_truncated = false;
     if (_cfg) {
         size_t loc_len = strlen(_cfg->locator);
         bool is_compound = (strchr(_cfg->callsign, '/') != NULL);
-        // 6-char locator + simple callsign: Type-3 companion suppressed
+        // 6-char locator + simple callsign → Type-1/Type-3 alternation active
         loc_truncated = (loc_len == 6u) && !is_compound;
     }
     web_server_cfg_unlock();
