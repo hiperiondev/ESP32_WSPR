@@ -189,6 +189,8 @@ static void wspr_transmit(void) {
     uint8_t snap_power;
     uint8_t snap_parity;
     uint8_t snap_region;
+    // tracks the WSPR frame type actually transmitted this slot (1/2/3)
+    int actual_tx_type = 1;
     web_server_cfg_lock();
     memcpy(snap_callsign, g_cfg.callsign, CALLSIGN_LEN);
     memcpy(snap_locator, g_cfg.locator, LOCATOR_LEN);
@@ -207,6 +209,8 @@ static void wspr_transmit(void) {
 
     if (msg_type == WSPR_MSG_TYPE_1) {
         // Standard Type-1: simple callsign + 4-char locator. No alternation needed.
+        // record actual frame type for status display
+        actual_tx_type = 1;
         enc_result = wspr_encode(snap_callsign, snap_locator, snap_power, symbols);
     } else if (msg_type == WSPR_MSG_TYPE_3) {
         // simple callsign + 6-char locator now properly alternates:
@@ -218,6 +222,8 @@ static void wspr_transmit(void) {
             // parity==0: Type-1 with first 4 chars of the stored locator.
             // wspr_encode() also accepts the full 6-char string and truncates
             // internally, but passing an explicit 4-char buffer is clearer.
+            // parity==0 sends a Type-1 frame
+            actual_tx_type = 1;
             char loc4[5];
             loc4[0] = snap_locator[0];
             loc4[1] = snap_locator[1];
@@ -230,6 +236,8 @@ static void wspr_transmit(void) {
             // parity==1: Type-3 companion with the full 6-char sub-square locator.
             // wspr_encode_type() only returns WSPR_MSG_TYPE_3 when strlen(locator)>=6,
             // so snap_locator is guaranteed to have at least 6 usable characters.
+            // parity==1 sends a Type-3 frame
+            actual_tx_type = 3;
             char loc6[7];
             memcpy(loc6, snap_locator, 6);
             loc6[6] = '\0';
@@ -249,6 +257,8 @@ static void wspr_transmit(void) {
         // (parity==1). The Type-3 companion is valid here because the receiver
         // links it to the Type-2 via the 15-bit callsign hash.
         if (snap_parity == 0) {
+            // parity==0 sends a Type-2 frame
+            actual_tx_type = 2;
             enc_result = wspr_encode(snap_callsign, snap_locator, snap_power, symbols);
         } else {
             // For compound callsigns (Type-2), skip the Type-3
@@ -264,6 +274,8 @@ static void wspr_transmit(void) {
                 g_pre_armed = false;
                 return;
             }
+            // parity==1 sends a Type-3 companion frame
+            actual_tx_type = 3;
             char loc6[7];
             memcpy(loc6, snap_locator, 6);
             loc6[6] = '\0';
@@ -344,6 +356,9 @@ static void wspr_transmit(void) {
     oscillator_set_freq_mhz(base_hz, tone_offsets[0]);
 
     oscillator_enable(true);
+    // publish the actual frame type to the status cache so the web UI
+    // and terminal log can display "Active TX: ON Type-N" during the symbol loop.
+    web_server_set_tx_type(actual_tx_type);
     g_tx_active = true;
 
     // Use 64-bit esp_timer_get_time() directly for the TX
@@ -386,10 +401,12 @@ static void wspr_transmit(void) {
     ESP_LOGI(TAG,
              "TX start: %02d:%02d:%02d.%06lu UTC  "
              "phase=%lu s  usec=%lu  verdict=%s  "
-             "band=%s  freq=%lu Hz  type=%d  parity=%d  "
+             // tx_type= is the actual frame type transmitted this slot (1/2/3);
+             // enc_path= is the wspr_encode_type() selector (1=Type-1 only, 2=compound, 3=Type-1+Type-3 alternation)
+             "band=%s  freq=%lu Hz  tx_type=%d  enc_path=%d  parity=%d  "
              "pre_armed=%d  stack_HWM=%u B",
              tm_tx.tm_hour, tm_tx.tm_min, tm_tx.tm_sec, (unsigned long)tv_tx.tv_usec, (unsigned long)tx_sec, (unsigned long)tx_usec, align_verdict,
-             BAND_NAME[g_band_idx], (unsigned long)base_hz, (int)msg_type, (int)snap_parity, (int)(g_pre_arm_base_hz != 0),
+             BAND_NAME[g_band_idx], (unsigned long)base_hz, actual_tx_type, (int)msg_type, (int)snap_parity, (int)(g_pre_arm_base_hz != 0),
              (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     if (tx_sec != 1u) {
@@ -498,6 +515,8 @@ static void wspr_transmit(void) {
 
     oscillator_enable(false);
     g_tx_active = false;
+    // clear the frame type so the web UI reverts to "OFF" after TX ends
+    web_server_set_tx_type(0);
     oscillator_tx_end();
     g_symbol_idx = 0;
 

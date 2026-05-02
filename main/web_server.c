@@ -648,7 +648,10 @@ static const char INDEX_HTML[] =
     "document.getElementById('s_freq').textContent=s.freq_str||'---';"
     "document.getElementById('s_next').textContent=s.next_tx_sec>0?s.next_tx_sec+'s':'" WEBUI_JS_TRANSMITTING "';"
     "document.getElementById('s_tx').innerHTML=s.tx_active?"
-    "`<span class='badge ok'>ON</span>`:`<span class='badge err'>OFF</span>`;"
+    // append the WSPR message type number to the ON badge so the operator
+    // can see which frame type is currently on-air (Type-1, Type-2, or Type-3).
+    // tx_msg_type is 0 before the first TX; fall back to 1 so the label is never blank.
+    "`<span class='badge ok'>ON Type-${s.tx_msg_type>0?s.tx_msg_type:1}</span>`:`<span class='badge err'>OFF</span>`;"
     "document.getElementById('s_sym').textContent=s.tx_active?(s.symbol_idx+'/162'):'---';"
     // Show an informational notice when a 6-char locator + simple callsign
     // is configured: wspr_transmit() now alternates Type-1 (4-char loc) and
@@ -779,6 +782,8 @@ typedef struct {
     char reboot_time_str[32];
     char reboot_reason[32];
     bool si5351_active;
+    // actual WSPR message type being transmitted this slot (1/2/3); 0 = idle
+    int tx_msg_type;
 } wspr_status_t;
 
 static wspr_status_t _status = { 0 };
@@ -844,6 +849,17 @@ void web_server_set_reboot_info(const char *boot_time_str, const char *reason_st
             strncpy(_status.reboot_reason, reason_str, sizeof(_status.reboot_reason) - 1);
             _status.reboot_reason[sizeof(_status.reboot_reason) - 1] = '\0';
         }
+        xSemaphoreGive(_status_mutex);
+    }
+}
+
+// sets the active WSPR message type (1/2/3) or 0 when idle.
+// Called from wspr_transmit() in main.c just before and just after the symbol loop.
+// msg_type values: 1=Type-1, 2=Type-2 (compound callsign primary), 3=Type-3 companion.
+// Set to 0 after TX ends so the badge reverts to OFF when idle.
+void web_server_set_tx_type(int msg_type) {
+    if (_status_mutex && xSemaphoreTake(_status_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        _status.tx_msg_type = msg_type;
         xSemaphoreGive(_status_mutex);
     }
 }
@@ -1206,6 +1222,10 @@ static esp_err_t h_status(httpd_req_t *req) {
     cJSON_AddRawToObject(j, "next_tx_sec", _ntx_str);
     cJSON_AddBoolToObject(j, "tx_active", snap.tx_active);
     cJSON_AddBoolToObject(j, "tx_enabled", snap.tx_enabled);
+    // include the active WSPR message type (0=idle, 1=Type-1, 2=Type-2, 3=Type-3)
+    char _tx_type_str[4];
+    snprintf(_tx_type_str, sizeof(_tx_type_str), "%d", snap.tx_msg_type);
+    cJSON_AddRawToObject(j, "tx_msg_type", _tx_type_str);
     char _sym_str[8];
     snprintf(_sym_str, sizeof(_sym_str), "%d", snap.symbol_idx);
     cJSON_AddRawToObject(j, "symbol_idx", _sym_str);

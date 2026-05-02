@@ -218,4 +218,11 @@ void web_server_cfg_lock(void);
  */
 void web_server_cfg_unlock(void);
 
+// update the active WSPR message type shown in the status panel.
+// Call with msg_type = 1, 2, or 3 just before the symbol loop in wspr_transmit(),
+// and with msg_type = 0 immediately after TX ends (or when TX is skipped/aborted).
+// Values: 0 = idle, 1 = Type-1, 2 = Type-2 (compound primary), 3 = Type-3 companion.
+// Thread-safe: uses the internal status mutex. Safe to call from any FreeRTOS task.
+void web_server_set_tx_type(int msg_type);
+
 /** @} */
