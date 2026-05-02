@@ -682,10 +682,6 @@ static void scheduler_task(void *arg) {
         // (CONFIG_WSPR_NTP_FRESHNESS_HOURS, 1–24), matching the typical SNTP poll
         // interval so a warning fires if the SNTP client has missed its schedule.
         // The check runs once per scheduler iteration (~every 2 minutes at 100% duty).
-#ifndef CONFIG_WSPR_NTP_FRESHNESS_HOURS
-// default freshness threshold: 1 hour (3600 seconds) expressed in microseconds
-#define CONFIG_WSPR_NTP_FRESHNESS_HOURS 1
-#endif
 #define NTP_FRESHNESS_THRESHOLD_US ((int64_t)CONFIG_WSPR_NTP_FRESHNESS_HOURS * 3600LL * 1000000LL)
         if (time_sync_source() == TIME_SYNC_NTP) {
             int64_t last_sync = time_sync_last_sync_us();
@@ -1188,7 +1184,18 @@ void app_main(void) {
     // interrupt-driven preemptions of up to 7000 us on that core.
     // Pinning to APP_CPU isolates the timing-critical WSPR symbol loop from
     // Wi-Fi jitter, reducing per-symbol timing error from ~7 ms to < 100 us.
-    xTaskCreatePinnedToCore(scheduler_task, "wspr_sched", 8192, NULL, 5, NULL, 1); // APP_CPU = core 1
+    // Raise scheduler priority to configMAX_PRIORITIES-1.
+    // During the WSPR symbol loop the task busy-spins the final WSPR_I2C_LEAD_US
+    // (400 us) before each symbol boundary. Any task with equal or higher priority
+    // that wakes on APP_CPU during that window will preempt the spin and cause a
+    // per-symbol jitter spike. At configMAX_PRIORITIES-1 only the idle task and
+    // tasks explicitly set to the same priority can run on APP_CPU while the spin
+    // is active, bounding jitter to < 10 us (one Xtensa LX6 context-switch at
+    // 240 MHz). The status_task (priority 3) and all Wi-Fi tasks (pinned to
+    // PRO_CPU / core 0) are unaffected.
+    // Stack increased to 10240 bytes to absorb the tone_offsets[162] pre-compute
+    // array (162 * 4 = 648 bytes) plus extra diagnostic log buffer headroom.
+    xTaskCreatePinnedToCore(scheduler_task, "wspr_sched", 10240, NULL, configMAX_PRIORITIES - 1, NULL, 1); // APP_CPU = core 1
 
     while (1)
         vTaskDelay(pdMS_TO_TICKS(10000));

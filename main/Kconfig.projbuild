@@ -303,4 +303,22 @@ menu "WSPR Transmitter"
             Use DUMMY mode on development hardware that has no oscillator fitted,
             or on Si5351-only boards where the AD9850 footprint is unpopulated.
 
+    config WSPR_NTP_FRESHNESS_HOURS
+        int "NTP freshness warning threshold (hours)"
+        default 1
+        range 1 24
+        help
+            If the last successful NTP synchronisation is older than this many
+            hours, the scheduler logs a warning and attempts to restart the SNTP
+            client to force a re-sync. This matters because the ESP32 internal
+            RTC drifts up to +/-30 ppm (+/-108 ms/hour); after CONFIG_WSPR_NTP_FRESHNESS_HOURS
+            hours without an NTP correction the accumulated drift may exceed
+            the +/-1 s WSPR decoder tolerance.
+            The default of 1 hour matches the typical SNTP polling interval, so
+            a warning fires if the client has missed exactly one scheduled poll.
+            Set to 2-4 hours to reduce log noise on networks with occasional
+            NTP hiccups.
+            This option is ignored in GPS mode because PPS provides continuous
+            1 Hz corrections that keep the clock within a few microseconds.
+
 endmenu
