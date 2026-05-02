@@ -175,4 +175,14 @@ int32_t time_sync_secs_to_next_tx(void);
 // @return false — NTP mode, or GPS mode but no valid fix yet.
 bool time_sync_get_position(gps_position_t *pos);
 
+// Return the esp_timer_get_time() value at the last successful sync.
+// Returns 0 if no synchronization has occurred yet (before the first NTP or GPS sync).
+// For NTP mode, updated by the SNTP callback on every successful server response.
+// For GPS mode, updated every time a valid RMC/ZDA sentence is parsed and applied.
+// Use this to detect stale sync: if (now - time_sync_last_sync_us()) > threshold,
+// the ESP32 RTC may have drifted beyond WSPR decoder tolerance (+/-1 second).
+// GPS mode is not affected by drift because PPS provides continuous 1 Hz corrections.
+// Safe to call from any task.
+int64_t time_sync_last_sync_us(void);
+
 /** @} */

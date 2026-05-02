@@ -31,6 +31,12 @@ static const char *TAG = "time_sync";
 // Set to true on the first successful time update; never cleared
 static volatile bool _synced = false;
 
+// esp_timer_get_time() value at the last successful sync (GPS or NTP).
+// Zero means no sync has occurred yet. Updated atomically (single 64-bit write
+// on Xtensa is not guaranteed atomic, but worst case is a stale read which is
+// acceptable for a freshness check — the scheduler will warn again next cycle).
+static volatile int64_t _last_sync_us = 0;
+
 // runtime-selected time source (set during time_sync_init)
 static volatile time_sync_source_t _source = TIME_SYNC_NONE;
 
@@ -387,6 +393,8 @@ static void gps_task(void *arg) {
                 } else if (parse_rmc_or_zda(line, &tv)) {
                     settimeofday(&tv, NULL);
                     _synced = true;
+                    // record the esp_timer timestamp of this GPS sync
+                    _last_sync_us = esp_timer_get_time();
                     ESP_LOGI(TAG, "GPS time set from NMEA sentence");
 #if GPS_PPS_ENABLED
                     // Apply PPS sub-second correction in task context (not ISR)
@@ -525,6 +533,10 @@ static void install_gps_pps(void) {
 // SNTP synchronization callback — called by the SNTP client task.
 static void sntp_cb(struct timeval *tv) {
     _synced = true;
+    // record the esp_timer timestamp of this NTP sync so the
+    // scheduler can detect when the last sync is stale (>1 hour old) and
+    // warn about potential clock drift exceeding WSPR decoder tolerance.
+    _last_sync_us = esp_timer_get_time();
     char buf[32];
     struct tm t;
     gmtime_r(&tv->tv_sec, &t);
@@ -657,4 +669,14 @@ bool time_sync_get_position(gps_position_t *pos) {
     pos->latitude_deg = _gps_lat;
     pos->longitude_deg = _gps_lon;
     return _gps_pos_valid;
+}
+
+// time_sync_last_sync_us — returns the esp_timer_get_time() value
+// recorded at the most recent successful GPS or NTP synchronization.
+// Returns 0 if no synchronization has occurred yet.
+// The scheduler uses this to detect when the last sync is stale (>1 hour old),
+// which on the ESP32 internal RTC (+/-30 ppm) can cause up to 108 ms/hour drift,
+// accumulating to >1 second over ~9 hours — beyond WSPR decoder tolerance.
+int64_t time_sync_last_sync_us(void) {
+    return _last_sync_us;
 }

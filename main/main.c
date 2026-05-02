@@ -656,6 +656,45 @@ static void scheduler_task(void *arg) {
             time_synced_logged = true;
         }
 
+        // NTP freshness check: warn when the last NTP sync is stale.
+        // The ESP32 internal RTC drifts up to +/-30 ppm (+/-108 ms/hour). Over a
+        // 12-hour continuous TX run with no NTP correction the clock can drift
+        // +/-1.3 seconds — beyond the WSPR decoder tolerance of +/-1 second.
+        // GPS mode provides continuous 1 Hz corrections via PPS, so this check
+        // is intentionally skipped in GPS mode. The threshold is 1 hour by default
+        // (CONFIG_WSPR_NTP_FRESHNESS_HOURS, 1–24), matching the typical SNTP poll
+        // interval so a warning fires if the SNTP client has missed its schedule.
+        // The check runs once per scheduler iteration (~every 2 minutes at 100% duty).
+#ifndef CONFIG_WSPR_NTP_FRESHNESS_HOURS
+// default freshness threshold: 1 hour (3600 seconds) expressed in microseconds
+#define CONFIG_WSPR_NTP_FRESHNESS_HOURS 1
+#endif
+#define NTP_FRESHNESS_THRESHOLD_US ((int64_t)CONFIG_WSPR_NTP_FRESHNESS_HOURS * 3600LL * 1000000LL)
+        if (time_sync_source() == TIME_SYNC_NTP) {
+            int64_t last_sync = time_sync_last_sync_us();
+            if (last_sync > 0) {
+                int64_t age_us = esp_timer_get_time() - last_sync;
+                if (age_us > NTP_FRESHNESS_THRESHOLD_US) {
+                    // Convert age to minutes for a human-readable log entry.
+                    int32_t age_min = (int32_t)(age_us / 60000000LL);
+                    ESP_LOGW(TAG,
+                             "NTP FRESHNESS WARNING: last sync was %ld min ago "
+                             "(threshold=%d h). ESP32 RTC drift may exceed "
+                             "+/-1 s WSPR tolerance. Check NTP connectivity.",
+                             (long)age_min, (int)CONFIG_WSPR_NTP_FRESHNESS_HOURS);
+                    // Attempt to restart the SNTP client to force a re-sync.
+                    // This is safe to call from any task; it stops and restarts
+                    // the SNTP polling timer without blocking.
+                    web_server_cfg_lock();
+                    char ntp_snap[sizeof(g_cfg.ntp_server)];
+                    memcpy(ntp_snap, g_cfg.ntp_server, sizeof(ntp_snap));
+                    web_server_cfg_unlock();
+                    time_sync_restart_ntp(ntp_snap);
+                    ESP_LOGI(TAG, "NTP freshness: restarted SNTP client to force re-sync");
+                }
+            }
+        }
+
         // Check if transmission is globally enabled
         web_server_cfg_lock();
         bool tx_enabled_snap = g_cfg.tx_enabled;

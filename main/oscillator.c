@@ -468,20 +468,20 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
     // If the crystal runs fast by ppb, the PLL ratio must be reduced by the same
     // fraction so that the VCO (and hence the output) reaches the target:
     //   delta_b = (pll_a*pll_c + pll_b_base) * ppb_abs / 1e9
-    // 32-bit safe split arithmetic (all intermediates < 2^32):
-    //   pll_total <= 90*1048575+1048574 = 95,371,324
-    //   pt_q = pll_total/1000 <= 95,371
-    //   ppb_q = ppb_abs/1000 <= 100 (ppb clamped to +-100000)
-    //   pt_q * ppb_q <= 9,537,100 -- fits uint32_t comfortably
+    // Use 64-bit arithmetic to avoid truncation error in the delta_b
+    // calculation. The old 32-bit three-term split had up to 20 LSB error at
+    // large ppb values (e.g. 100,000 ppb), corresponding to ~13 Hz frequency
+    // error at 20 m — 10x the WSPR tone spacing, placing the carrier outside
+    // the WSPR monitoring window. With 64-bit: pll_total64 * ppb_abs64 has a
+    // maximum of 95,371,324 * 100,000 = 9.537e12 < 2^43, well within uint64_t.
+    // Rounding: +500,000,000 gives the nearest-integer result (round half up).
     if (_si_cal != 0) {
-        uint32_t ppb_abs2 = (_si_cal >= 0) ? (uint32_t)_si_cal : (uint32_t)(-(int32_t)_si_cal);
-        uint32_t pll_total = pll_a * pll_c + pll_b_base;
-        uint32_t pt_q = pll_total / 1000u;
-        uint32_t pt_r = pll_total % 1000u;
-        uint32_t ppb_q2 = ppb_abs2 / 1000u;
-        uint32_t ppb_r2 = ppb_abs2 % 1000u;
-        // Three-term split keeps every intermediate within uint32_t range
-        uint32_t delta_b = pt_q * ppb_q2 / 1000u + pt_q * ppb_r2 / 1000000u + pt_r * ppb_q2 / 1000000u;
+        uint64_t ppb_abs64 = (uint64_t)((_si_cal >= 0) ? _si_cal : -(int64_t)_si_cal);
+        uint64_t pll_total64 = (uint64_t)pll_a * pll_c + pll_b_base;
+        // delta_b = round(pll_total * ppb / 1e9) using integer arithmetic
+        uint64_t delta_b64 = (pll_total64 * ppb_abs64 + 500000000ULL) / 1000000000ULL;
+        // clamp to uint32_t range (cannot exceed pll_c - 1 in practice)
+        uint32_t delta_b = (delta_b64 > 0xFFFFFFFFULL) ? 0xFFFFFFFFu : (uint32_t)delta_b64;
         if (_si_cal > 0) {
             // Crystal runs fast: lower pll_b to reduce effective VCO
             if (delta_b < pll_b_base)
@@ -490,8 +490,9 @@ static esp_err_t si_cache_band(uint32_t freq_hz) {
                 pll_b_base = 0u;
         } else {
             // Crystal runs slow: raise pll_b to increase effective VCO
-            pll_b_base += delta_b;
-            if (pll_b_base >= pll_c)
+            if ((uint64_t)pll_b_base + delta_b < pll_c)
+                pll_b_base += delta_b;
+            else
                 pll_b_base = pll_c - 1u;
         }
         ESP_LOGD(TAG, "SI5351 cal: ppb=%ld delta_b=%lu pll_b_base_cal=%lu", (long)_si_cal, (unsigned long)delta_b, (unsigned long)pll_b_base);
